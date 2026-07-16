@@ -304,6 +304,44 @@ Les seuls fichiers ecrits sont le cache du dernier releve
 (`~/.cache/claude-jauge/state.json` sous Linux) et le fichier de reglages. Ni
 l'un ni l'autre ne contient de jeton.
 
+## Integration continue
+
+Le travail est partage entre deux forges, et ce n'est pas un caprice : **un
+`.dmg` ne se compile que sur macOS, un `.msi` que sur Windows**. Le serveur
+OneDev n'ayant que du Linux, il ne peut pas produire l'app.
+
+| | Quand | Ce qui en sort |
+| --- | --- | --- |
+| **OneDev** ([`.onedev-buildspec.yml`](.onedev-buildspec.yml)) | chaque push | tests du coeur et du CLI |
+| **OneDev** | tag `v*` | binaire CLI Linux, en artefact de build |
+| **GitHub Actions** ([`release.yml`](.github/workflows/release.yml)) | tag `v*` | `.dmg` (ARM + Intel), `.msi`, AppImage et `.deb`, plus le CLI des trois OS |
+
+Publier une version :
+
+```sh
+git tag -a v0.2.0 -m "claude-jauge 0.2.0"
+git push origin v0.2.0    # OneDev : tests + CLI Linux
+git push github v0.2.0    # GitHub : les paquets des trois OS
+```
+
+La release GitHub est creee **en brouillon** : rien n'est publie sans relecture.
+
+### Deux pieges rencontres
+
+Le buildspec OneDev est un schema versionne, et les exemples qui circulent en
+ligne sont perimes. Pour OneDev 16.1.0 il faut `version: 52` (les methodes
+`migrateN` du jar amenent *vers* N, donc la derniere presente donne la version
+courante, pas celle d'apres), `!PosixInterpreter` et non `DefaultInterpreter`,
+`commands` en texte et non en liste, `condition: SUCCESSFUL` et non
+`ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL`, `runAs` sous forme `<uid>:<gid>`, et un
+`userMatch` obligatoire sur `BranchUpdateTrigger`. Aucun executeur n'a besoin
+d'etre configure : OneDev en decouvre un via `docker.sock`.
+
+Cote GitHub, pousser un fichier de workflow exige le scope `workflow` sur le
+jeton (`gh auth refresh -h github.com -s workflow`), et **un tag pousse dans le
+meme mouvement que la creation du workflow ne le declenche pas** : il faut le
+repousser une fois le workflow enregistre.
+
 ## Tests
 
 ```sh
