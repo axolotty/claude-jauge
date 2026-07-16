@@ -118,13 +118,17 @@ pub fn candidate_files() -> Vec<PathBuf> {
 
 /// Lance une commande et rend sa sortie standard, sans jamais attendre
 /// indefiniment.
-pub fn run_command(command: &str, timeout: Duration) -> Result<String, Error> {
+///
+/// L'erreur est une simple chaine : cette fonction sert aussi bien a lire un
+/// jeton qu'a rapatrier le releve d'une autre machine, donc c'est a l'appelant
+/// de dire de quoi il s'agissait.
+pub fn run_command(command: &str, timeout: Duration) -> Result<String, String> {
     let mut child = shell(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|err| Error::Credentials(format!("commande impossible a lancer ({err})")))?;
+        .map_err(|err| format!("commande impossible a lancer ({err})"))?;
 
     let debut = Instant::now();
     let status = loop {
@@ -134,15 +138,15 @@ pub fn run_command(command: &str, timeout: Duration) -> Result<String, Error> {
                 if debut.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::Credentials(format!(
+                    return Err(format!(
                         "la commande n'a pas repondu en {} s. Sur macOS, c'est souvent \
                          une autorisation de trousseau qui attend un clic.",
                         timeout.as_secs()
-                    )));
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(err) => return Err(Error::Credentials(format!("commande interrompue ({err})"))),
+            Err(err) => return Err(format!("commande interrompue ({err})")),
         }
     };
 
@@ -152,10 +156,10 @@ pub fn run_command(command: &str, timeout: Duration) -> Result<String, Error> {
     }
 
     if !status.success() {
-        return Err(Error::Credentials(format!(
+        return Err(format!(
             "la commande a echoue (code {})",
             status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
-        )));
+        ));
     }
 
     Ok(sortie)
@@ -195,7 +199,7 @@ pub fn load(source: &CredentialsSource) -> Result<Credentials, Error> {
     // l'utilisateur a pris la peine de la renseigner, retomber en silence sur la
     // detection automatique masquerait sa faute de frappe.
     if let Some(command) = &source.command {
-        let document = run_command(command, COMMAND_TIMEOUT)?;
+        let document = run_command(command, COMMAND_TIMEOUT).map_err(Error::Credentials)?;
         return parse(&document, "commande configuree");
     }
 
@@ -326,7 +330,7 @@ mod tests {
         let err = run_command("sleep 5", Duration::from_millis(300)).unwrap_err();
         // Coupee bien avant les 5 secondes du sleep.
         assert!(debut.elapsed() < Duration::from_secs(2), "pas coupee assez vite");
-        assert!(matches!(err, Error::Credentials(detail) if detail.contains("repondu")));
+        assert!(err.contains("repondu"), "message inattendu : {err}");
     }
 
     #[test]

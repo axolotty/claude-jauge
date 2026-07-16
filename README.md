@@ -73,10 +73,33 @@ machine. Une cle API de `console.anthropic.com` ne conviendrait pas : elle ouvre
 sur le pay-as-you-go, dont les quotas sont d'une autre nature (requetes/min,
 tokens/min) et qui ne renvoie aucun en-tete `unified-*`.
 
+## Surveiller depuis une machine sans Claude Code
+
+Le cas classique : coder sur un serveur, surveiller depuis son portable. Les
+quotas etant globaux au compte, peu importe d'ou on regarde.
+
+La bonne facon est de rapatrier le **releve**, pas le jeton :
+
+```json
+{ "remote": { "command": "ssh serveur cat .cache/claude-jauge/state.json" } }
+```
+
+Le serveur tient son cache a jour tout seul, par sa statusline. Le poste qui
+regarde ne fait que le lire : aucun jeton ne circule, rien n'expire, aucune
+requete n'est envoyee a l'API, et le cache local sert de tampon (une lecture par
+minute au plus). Quand la machine est injoignable, le dernier releve connu reste
+affiche, avec son age reel et la raison de l'echec.
+
+L'autre facon, rapatrier le jeton via `credentials.command`, marche aussi mais
+elle est fragile : **rien ne rafraichit un jeton OAuth a part Claude Code**. Des
+qu'il s'arrete sur la machine d'origine, le fichier perime en quelques heures et
+le widget tombe en panne. A reserver aux cas ou l'autre machine n'a pas
+`claude-jauge`.
+
 ## Ou trouver le jeton (repli uniquement)
 
-Rien de tout ceci n'est necessaire avec la statusline : elle n'utilise aucun
-jeton. Ce qui suit ne vaut que pour la sonde de repli.
+Rien de tout ceci n'est necessaire avec la statusline ni avec `remote` : ni
+l'une ni l'autre n'utilise de jeton. Ce qui suit ne vaut que pour la sonde.
 
 Par defaut, la ou Claude Code le range : trousseau macOS
 (`Claude Code-credentials`), ou `~/.claude/.credentials.json`.
@@ -278,7 +301,7 @@ l'un ni l'autre ne contient de jeton.
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-77 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
+78 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
 politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence

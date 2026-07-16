@@ -45,6 +45,8 @@ pub enum Error {
     TokenExpired,
     /// L'appel a l'API n'a pas abouti.
     Probe(String),
+    /// La machine qui detient le releve n'a pas repondu.
+    Remote(String),
     /// La reponse est arrivee, mais sans aucun en-tete de quota.
     NoQuotaHeaders,
     /// Un chemin standard n'a pas pu etre determine.
@@ -62,6 +64,7 @@ impl fmt::Display for Error {
                 "le jeton OAuth a expire. Lance Claude Code une fois : il le renouvellera."
             ),
             Error::Probe(detail) => write!(f, "la sonde a echoue : {detail}"),
+            Error::Remote(detail) => write!(f, "machine distante : {detail}"),
             Error::NoQuotaHeaders => write!(
                 f,
                 "la reponse de l'API ne portait aucun en-tete de quota (format change ?)"

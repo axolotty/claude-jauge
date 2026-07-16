@@ -121,11 +121,35 @@ impl CredentialsSource {
     }
 }
 
+/// Lire le releve d'une autre machine, plutot que d'en faire un soi-meme.
+///
+/// C'est la bonne facon de surveiller depuis un poste ou Claude Code ne tourne
+/// pas. On pourrait y rapatrier le jeton (voir [`CredentialsSource`]), mais
+/// c'est fragile : rien ne rafraichit un jeton OAuth a part Claude Code, donc
+/// des qu'il s'arrete sur la machine d'origine, le fichier perime et le widget
+/// tombe en panne pour des heures.
+///
+/// Lire le cache de l'autre machine evite tout ca : c'est sa statusline qui le
+/// tient a jour, gratuitement. Aucun jeton ne circule, rien n'expire, et aucune
+/// requete n'est envoyee a l'API.
+///
+/// ```json
+/// { "remote": { "command": "ssh serveur cat .cache/claude-jauge/state.json" } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RemoteSource {
+    /// Commande dont la sortie standard est le cache d'une autre machine.
+    pub command: Option<String>,
+}
+
 /// Les reglages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub policy: Policy,
+    /// Lire le releve d'ailleurs. Prime sur tout le reste.
+    pub remote: RemoteSource,
     pub credentials: CredentialsSource,
 }
 
@@ -198,6 +222,9 @@ mod tests {
         let fichier = dir.0.join("config.json");
         let config = Config {
             policy: Policy::Prudent,
+            remote: RemoteSource {
+                command: Some("ssh serveur cat .cache/claude-jauge/state.json".to_string()),
+            },
             credentials: CredentialsSource {
                 command: Some("ssh serveur cat .claude/.credentials.json".to_string()),
                 ..Default::default()
@@ -208,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn une_config_sans_bloc_credentials_reste_lisible() {
+    fn une_config_sans_les_blocs_recents_reste_lisible() {
         // La forme qu'avaient les fichiers avant l'ajout des echappatoires : ils
         // ne doivent pas devenir illisibles du jour au lendemain.
         let dir = TempDir::new("ancienne");
@@ -217,6 +244,24 @@ mod tests {
         let config = load(&fichier);
         assert_eq!(config.policy, Policy::Prudent);
         assert_eq!(config.credentials, CredentialsSource::default());
+        assert_eq!(config.remote, RemoteSource::default());
+    }
+
+    #[test]
+    fn un_bloc_remote_seul_suffit() {
+        // Le cas du poste qui ne fait que regarder : pas de politique a choisir,
+        // pas d'identifiants a fournir.
+        let dir = TempDir::new("remote");
+        let fichier = dir.0.join("config.json");
+        fs::write(
+            &fichier,
+            r#"{"remote": {"command": "ssh serveur cat .cache/claude-jauge/state.json"}}"#,
+        )
+        .unwrap();
+        let config = load(&fichier);
+        assert!(config.remote.command.is_some());
+        assert!(!config.credentials.is_explicit());
+        assert_eq!(config.policy, Policy::Fidele);
     }
 
     #[test]

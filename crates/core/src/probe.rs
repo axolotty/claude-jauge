@@ -27,11 +27,12 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Interroge l'API et rend l'etat des quotas lu dans les en-tetes.
+///
+/// On ne refuse plus a priori sur la foi de `expiresAt`. Le jeton peut venir
+/// d'une autre machine, dont l'horloge n'est pas la notre, et une date
+/// d'expiration n'est qu'une promesse : seule l'API sait vraiment. Un 401 nous
+/// le dira, et c'est la reponse qui fait foi.
 pub fn probe(creds: &Credentials, now: u64) -> Result<Quota, Error> {
-    if creds.is_expired(now) {
-        return Err(Error::TokenExpired);
-    }
-
     let body = json!({
         "model": PROBE_MODEL,
         "max_tokens": 1,
@@ -47,8 +48,11 @@ pub fn probe(creds: &Credentials, now: u64) -> Result<Quota, Error> {
 
     match request.send_json(body) {
         Ok(response) => read(&response, now),
-        // Un refus porte justement les en-tetes qui nous interessent le plus :
-        // c'est quand le quota est epuise qu'on veut savoir quand il revient.
+        // Seule reponse qui tranche vraiment la question du jeton.
+        Err(ureq::Error::Status(401, _)) => Err(Error::TokenExpired),
+        // Un refus de quota, lui, porte justement les en-tetes qui nous
+        // interessent le plus : c'est quand le quota est epuise qu'on veut
+        // savoir quand il revient.
         Err(ureq::Error::Status(_, response)) => read(&response, now),
         Err(err) => Err(Error::Probe(err.to_string())),
     }

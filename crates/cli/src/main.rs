@@ -331,6 +331,7 @@ fn en_json(reading: &Reading) -> String {
 
     let origine = match reading.origin {
         Origin::Probed => "probed",
+        Origin::Remote => "remote",
         Origin::Cached => "cached",
         Origin::Idle => "idle",
     };
@@ -491,6 +492,10 @@ fn pied(reading: &Reading, quota: &Quota, now: u64, couleur: bool) -> String {
     let age = quota.age(now);
     bouts.push(match reading.origin {
         Origin::Probed => "releve a l'instant".to_string(),
+        // L'age affiche est celui du releve d'origine, pas celui du rapatriement :
+        // un vieux fichier fraichement lu reste un vieux fichier.
+        Origin::Remote if age < 60 => "releve distant, a l'instant".to_string(),
+        Origin::Remote => format!("releve distant, il y a {}", human_duration(age)),
         Origin::Cached if age < 60 => "releve a l'instant".to_string(),
         Origin::Cached => format!("releve il y a {}", human_duration(age)),
         Origin::Idle => "aucun releve".to_string(),

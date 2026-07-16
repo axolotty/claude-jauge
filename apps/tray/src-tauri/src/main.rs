@@ -106,6 +106,7 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
         plan: reading.subscription_type.clone(),
         origin: match reading.origin {
             Origin::Probed => "probed",
+            Origin::Remote => "remote",
             Origin::Cached => "cached",
             Origin::Idle => "idle",
         }

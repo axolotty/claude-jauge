@@ -16,6 +16,14 @@
 //! faux des que la consommation vient d'ailleurs.
 //!
 //! D'ou deux politiques, et un reglage pour choisir. Voir [`Policy`].
+//!
+//! Cela dit, tout ce module n'est qu'un repli. Deux chemins l'evitent
+//! entierement, et valent mieux que lui :
+//!
+//! * la statusline de Claude Code, qui nous sert les memes chiffres
+//!   gratuitement (voir [`crate::statusline`]) ;
+//! * la lecture du releve d'une autre machine, pour un poste ou Claude Code ne
+//!   tourne pas (voir [`crate::config::RemoteSource`]).
 
 use crate::config::{self, Policy};
 use crate::quota::{Quota, Source};
@@ -49,11 +57,19 @@ pub const STATUSLINE_WRITE_INTERVAL: u64 = 5;
 /// permanence. Sans ce plancher, on sonderait a chaque rafraichissement.
 pub const MIN_PROBE_INTERVAL: u64 = 60;
 
+/// Delai entre deux lectures d'une machine distante.
+///
+/// Le cache local sert de tampon : sans ce plancher, chaque battement d'horloge
+/// du widget ouvrirait une connexion.
+pub const REMOTE_INTERVAL: u64 = 60;
+
 /// D'ou vient le releve affiche.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// On vient d'interroger l'API.
     Probed,
+    /// Rejoue depuis le releve d'une autre machine.
+    Remote,
     /// Rien n'a bouge : on rejoue le dernier releve, resets appliques.
     Cached,
     /// Aucun releve connu, et la politique en cours interdit de sonder.
@@ -210,6 +226,79 @@ impl Meter {
         cache::store(&self.cache_file, quota)
     }
 
+    /// Va chercher le releve sur une autre machine.
+    ///
+    /// L'age affiche reste celui du releve d'origine, pas celui de la lecture :
+    /// c'est la date qui compte, et faire croire a de la fraicheur parce qu'on
+    /// vient de rapatrier un vieux fichier serait un mensonge.
+    fn read_remote(
+        &self,
+        command: &str,
+        cached: Option<Quota>,
+        force: bool,
+        policy: Policy,
+        now: u64,
+    ) -> Reading {
+        // La date du fichier de cache dit quand on a lu pour la derniere fois,
+        // ce qui evite d'ajouter un champ au format pour si peu.
+        let derniere_lecture = std::fs::metadata(&self.cache_file)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|instant| instant.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duree| duree.as_secs());
+
+        let tampon_frais = matches!(derniere_lecture, Some(at) if now.saturating_sub(at) < REMOTE_INTERVAL);
+        if tampon_frais && !force {
+            if let Some(quota) = cached {
+                return Reading {
+                    quota: Some(quota.settled(now)),
+                    origin: Origin::Remote,
+                    policy,
+                    subscription_type: None,
+                    note: None,
+                };
+            }
+        }
+
+        match credentials::run_command(command, std::time::Duration::from_secs(15))
+            .map_err(Error::Remote)
+            .and_then(|sortie| {
+                serde_json::from_str::<Quota>(sortie.trim()).map_err(|err| {
+                    Error::Remote(format!(
+                        "releve illisible ({err}). La statusline est-elle configuree \
+                         la-bas, et le chemin du cache est-il le bon ?"
+                    ))
+                })
+            }) {
+            Ok(distant) => {
+                let _ = cache::store(&self.cache_file, &distant);
+                Reading {
+                    quota: Some(distant.settled(now)),
+                    origin: Origin::Remote,
+                    policy,
+                    subscription_type: None,
+                    note: None,
+                }
+            }
+            // Machine injoignable : le dernier releve connu vaut mieux qu'un
+            // ecran vide, tant qu'on dit clairement ce qui se passe.
+            Err(err) => {
+                let avait_un_releve = cached.is_some();
+                Reading {
+                    quota: cached.map(|q| q.settled(now)),
+                    origin: if avait_un_releve {
+                        Origin::Remote
+                    } else {
+                        Origin::Idle
+                    },
+                    policy,
+                    subscription_type: None,
+                    note: Some(err.to_string()),
+                }
+            }
+        }
+    }
+
     /// Rend l'etat courant des quotas.
     ///
     /// `force` envoie une sonde quoi qu'il arrive : a reserver a une action
@@ -228,6 +317,13 @@ impl Meter {
 
         // Le type d'abonnement se lit en local : son absence n'est pas une
         // raison d'echouer.
+        // Lire le releve d'une autre machine court-circuite tout : ni jeton, ni
+        // sonde, ni politique. Le cache local ne sert plus que de tampon entre
+        // deux lectures.
+        if let Some(command) = config.remote.command.clone() {
+            return self.read_remote(&command, cached, force, policy, now);
+        }
+
         let creds = credentials::load(&config.credentials);
         let subscription_type = creds
             .as_ref()
