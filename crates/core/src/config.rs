@@ -81,11 +81,52 @@ impl Policy {
     }
 }
 
+/// D'ou sortir le jeton OAuth.
+///
+/// Par defaut, on le cherche la ou Claude Code le pose. Mais Claude Code n'est
+/// pas forcement installe sur la machine qui porte le widget : les quotas sont
+/// globaux au compte, donc surveiller depuis un poste ou l'on ne code pas est un
+/// usage parfaitement legitime. D'ou ces echappatoires.
+///
+/// Elles sont essayees dans l'ordre des champs ci-dessous, et la detection
+/// automatique ne sert que si aucune n'est renseignee.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CredentialsSource {
+    /// Commande dont la sortie standard est le JSON des identifiants.
+    ///
+    /// La plus solide des trois : elle est rejouee a chaque sonde, donc le jeton
+    /// reste frais. Elle couvre a peu pres tout, par exemple recuperer celui
+    /// d'une machine qui, elle, fait tourner Claude Code :
+    ///
+    /// ```json
+    /// { "command": "ssh serveur cat .claude/.credentials.json" }
+    /// ```
+    pub command: Option<String>,
+
+    /// Chemin explicite vers un fichier d'identifiants.
+    pub path: Option<String>,
+
+    /// Jeton brut.
+    ///
+    /// Depannage uniquement : un jeton OAuth expire en quelques heures, donc
+    /// celui-ci sera mort avant la fin de la journee. Preferer `command`.
+    pub token: Option<String>,
+}
+
+impl CredentialsSource {
+    /// Vrai si l'utilisateur a impose une source.
+    pub fn is_explicit(&self) -> bool {
+        self.command.is_some() || self.path.is_some() || self.token.is_some()
+    }
+}
+
 /// Les reglages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub policy: Policy,
+    pub credentials: CredentialsSource,
 }
 
 /// Lit les reglages.
@@ -155,9 +196,27 @@ mod tests {
     fn un_reglage_ecrit_se_relit() {
         let dir = TempDir::new("aller-retour");
         let fichier = dir.0.join("config.json");
-        let config = Config { policy: Policy::Prudent };
+        let config = Config {
+            policy: Policy::Prudent,
+            credentials: CredentialsSource {
+                command: Some("ssh serveur cat .claude/.credentials.json".to_string()),
+                ..Default::default()
+            },
+        };
         store(&fichier, &config).expect("ecriture");
         assert_eq!(load(&fichier), config);
+    }
+
+    #[test]
+    fn une_config_sans_bloc_credentials_reste_lisible() {
+        // La forme qu'avaient les fichiers avant l'ajout des echappatoires : ils
+        // ne doivent pas devenir illisibles du jour au lendemain.
+        let dir = TempDir::new("ancienne");
+        let fichier = dir.0.join("config.json");
+        fs::write(&fichier, r#"{"policy": "prudent"}"#).unwrap();
+        let config = load(&fichier);
+        assert_eq!(config.policy, Policy::Prudent);
+        assert_eq!(config.credentials, CredentialsSource::default());
     }
 
     #[test]

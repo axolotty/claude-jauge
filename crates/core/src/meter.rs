@@ -153,8 +153,14 @@ impl Meter {
     }
 
     /// Change la politique et l'ecrit sur le disque.
+    ///
+    /// On relit le fichier avant d'ecrire : reconstruire un `Config` de zero
+    /// effacerait les autres reglages, a commencer par la source des
+    /// identifiants, sur un simple clic dans le menu.
     pub fn set_policy(&self, policy: Policy) -> std::io::Result<()> {
-        config::store(&self.config_file, &config::Config { policy })
+        let mut config = config::load(&self.config_file);
+        config.policy = policy;
+        config::store(&self.config_file, &config)
     }
 
     /// Rend l'etat courant des quotas.
@@ -163,7 +169,10 @@ impl Meter {
     /// explicite de l'utilisateur, puisque cela peut ouvrir une fenetre de 5h.
     pub fn read(&self, force: bool) -> Reading {
         let now = crate::now();
-        let policy = self.policy();
+        // Les reglages sont relus a chaque tour : la bascule du menu et une
+        // retouche du fichier a la main doivent prendre effet sans redemarrage.
+        let config = config::load(&self.config_file);
+        let policy = self.policy_override.unwrap_or(config.policy);
         let cached = cache::load(&self.cache_file);
         let last_activity = activity::last_activity(&self.projects_dir);
         let last_probe = cached.as_ref().map(|q| q.probed_at);
@@ -171,7 +180,7 @@ impl Meter {
 
         // Le type d'abonnement se lit en local : son absence n'est pas une
         // raison d'echouer.
-        let creds = credentials::load();
+        let creds = credentials::load(&config.credentials);
         let subscription_type = creds
             .as_ref()
             .ok()

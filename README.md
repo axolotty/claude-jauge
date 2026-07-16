@@ -26,8 +26,45 @@ anthropic-ratelimit-unified-fallback: available
 ```
 
 Une requete minimale suffit donc a tout apprendre : on demande un jeton au plus
-petit modele, et on jette la reponse. Seuls les en-tetes comptent. Le jeton OAuth
-est celui que Claude Code a deja pose sur la machine.
+petit modele, et on jette la reponse. Seuls les en-tetes comptent.
+
+Il faut un jeton **OAuth d'abonnement**, celui que Claude Code pose sur la
+machine. Une cle API de `console.anthropic.com` ne conviendrait pas : elle ouvre
+sur le pay-as-you-go, dont les quotas sont d'une autre nature (requetes/min,
+tokens/min) et qui ne renvoie aucun en-tete `unified-*`.
+
+## Ou trouver le jeton
+
+Par defaut, la ou Claude Code le range : trousseau macOS
+(`Claude Code-credentials`), ou `~/.claude/.credentials.json`.
+
+Mais **Claude Code n'a pas besoin de tourner sur la machine qui porte le
+widget**. Les quotas sont globaux au compte, donc surveiller depuis un poste ou
+l'on ne code pas est un usage parfaitement legitime, et c'est meme le cas le plus
+courant : coder sur un serveur, surveiller depuis son portable. Le bloc
+`credentials` de la config sert a ca.
+
+```json
+{
+  "credentials": {
+    "command": "ssh serveur cat .claude/.credentials.json"
+  }
+}
+```
+
+| Champ | Quand | Remarque |
+| --- | --- | --- |
+| `command` | Claude Code vit ailleurs | **Le plus solide.** Rejoue a chaque sonde, donc le jeton reste frais. Le jeton ne touche jamais le disque local. |
+| `path` | Fichier a un endroit inhabituel | Un simple chemin. |
+| `token` | Depannage | Un jeton OAuth expire en quelques heures : il sera mort avant ce soir. |
+
+Les trois sont essayes dans cet ordre, et la detection automatique ne joue que si
+aucun n'est renseigne. Une source renseignee qui echoue est une erreur franche :
+retomber en silence sur la detection automatique masquerait une faute de frappe.
+
+Toute commande est coupee au bout de 10 s. Sans cette limite, une autorisation de
+trousseau restee sans reponse, ou un `ssh` vers une machine eteinte, figerait le
+widget sans un mot.
 
 > **Ces en-tetes ne sont pas documentes publiquement.** Ils peuvent changer sans
 > preavis. Tout est donc optionnel dans le code : un champ absent s'affiche `?`,
@@ -175,8 +212,10 @@ future n'apparaisse pas a tort comme un refus.
 
 ## Vie privee
 
-Le jeton OAuth est lu la ou Claude Code l'a mis (trousseau macOS, ou
-`~/.claude/.credentials.json`), et n'est envoye qu'a `api.anthropic.com`. Il
+Le jeton OAuth est lu la ou Claude Code l'a mis, ou a l'endroit que designe le
+bloc `credentials`, et n'est envoye qu'a `api.anthropic.com`. Il n'est jamais
+ecrit sur le disque : avec `credentials.command`, il ne fait que transiter en
+memoire. Il
 n'est jamais reecrit : les jetons de rafraichissement tournent a chaque usage,
 donc en consommer un ici risquerait d'invalider la session de Claude Code
 elle-meme. Quand le jeton expire, `claude-jauge` le dit et laisse Claude Code le
@@ -192,7 +231,7 @@ l'un ni l'autre ne contient de jeton.
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-59 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
+67 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
 politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence

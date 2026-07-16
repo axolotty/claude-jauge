@@ -13,14 +13,26 @@
 //! risquerait d'invalider la session de Claude Code lui-meme. Quand le jeton est
 //! expire, on le dit et on laisse Claude Code le renouveler de son cote.
 
+use crate::config::CredentialsSource;
 use crate::{paths, Error};
 use serde::Deserialize;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Le service sous lequel Claude Code range ses identifiants dans le trousseau.
 pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Au-dela, on abandonne la commande.
+///
+/// Ce n'est pas de la coquetterie : sur macOS, une lecture du trousseau par une
+/// application non signee ouvre une fenetre d'autorisation. Sans limite de
+/// temps, le processus attendrait indefiniment un clic que personne n'a vu, et
+/// le widget resterait fige sans rien dire. Un `ssh` vers une machine eteinte
+/// aurait le meme effet.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Ce dont la sonde a besoin, extrait du document de Claude Code.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,16 +116,71 @@ pub fn candidate_files() -> Vec<PathBuf> {
     files
 }
 
+/// Lance une commande et rend sa sortie standard, sans jamais attendre
+/// indefiniment.
+pub fn run_command(command: &str, timeout: Duration) -> Result<String, Error> {
+    let mut child = shell(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|err| Error::Credentials(format!("commande impossible a lancer ({err})")))?;
+
+    let debut = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if debut.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Error::Credentials(format!(
+                        "la commande n'a pas repondu en {} s. Sur macOS, c'est souvent \
+                         une autorisation de trousseau qui attend un clic.",
+                        timeout.as_secs()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => return Err(Error::Credentials(format!("commande interrompue ({err})"))),
+        }
+    };
+
+    let mut sortie = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut sortie);
+    }
+
+    if !status.success() {
+        return Err(Error::Credentials(format!(
+            "la commande a echoue (code {})",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+        )));
+    }
+
+    Ok(sortie)
+}
+
+/// Prepare l'appel a travers l'interpreteur de commandes de la plateforme.
+fn shell(command: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    }
+}
+
 /// Sort le document JSON du trousseau macOS, ou `None` s'il est inaccessible.
 fn read_keychain() -> Option<String> {
-    let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let document = String::from_utf8(out.stdout).ok()?;
+    let document = run_command(
+        &format!("security find-generic-password -s '{KEYCHAIN_SERVICE}' -w"),
+        COMMAND_TIMEOUT,
+    )
+    .ok()?;
     let document = document.trim().to_string();
     if document.is_empty() {
         None
@@ -122,8 +189,38 @@ fn read_keychain() -> Option<String> {
     }
 }
 
-/// Trouve et lit le jeton OAuth de Claude Code.
-pub fn load() -> Result<Credentials, Error> {
+/// Trouve et lit le jeton OAuth, en suivant les reglages.
+pub fn load(source: &CredentialsSource) -> Result<Credentials, Error> {
+    // Une source imposee l'emporte, et son echec est une erreur : si
+    // l'utilisateur a pris la peine de la renseigner, retomber en silence sur la
+    // detection automatique masquerait sa faute de frappe.
+    if let Some(command) = &source.command {
+        let document = run_command(command, COMMAND_TIMEOUT)?;
+        return parse(&document, "commande configuree");
+    }
+
+    if let Some(path) = &source.path {
+        let document = fs::read_to_string(path)
+            .map_err(|err| Error::Credentials(format!("{path} illisible ({err})")))?;
+        return parse(&document, path);
+    }
+
+    if let Some(token) = &source.token {
+        return Ok(Credentials {
+            token: token.clone(),
+            // Un jeton colle a la main ne dit rien de son expiration. On ne
+            // pretend pas la connaitre : l'API tranchera.
+            expires_at: None,
+            subscription_type: None,
+            source: "jeton configure".to_string(),
+        });
+    }
+
+    auto()
+}
+
+/// La detection automatique : la ou Claude Code pose ses identifiants.
+pub fn auto() -> Result<Credentials, Error> {
     if cfg!(target_os = "macos") {
         if let Some(document) = read_keychain() {
             return parse(&document, "trousseau macOS");
@@ -137,9 +234,14 @@ pub fn load() -> Result<Credentials, Error> {
             Err(_) => tried.push(path.display().to_string()),
         }
     }
+    if cfg!(target_os = "macos") {
+        tried.push(format!("trousseau ({KEYCHAIN_SERVICE})"));
+    }
 
     Err(Error::Credentials(format!(
-        "introuvable (cherche dans : {}). Connecte-toi une fois avec Claude Code.",
+        "aucun jeton trouve (cherche dans : {}). Si Claude Code ne tourne pas sur \
+         cette machine, renseigne `credentials.command` dans la config : les quotas \
+         sont globaux au compte, le jeton peut donc venir d'ailleurs.",
         tried.join(", ")
     )))
 }
@@ -188,6 +290,80 @@ mod tests {
         .unwrap();
         assert_eq!(creds.expires_at, None);
         assert!(!creds.is_expired(u64::MAX));
+    }
+
+    // --- Sources configurees ---------------------------------------------
+
+    /// Une commande qui recrache le document, comme le ferait `cat` ou un `ssh`.
+    fn source_commande() -> CredentialsSource {
+        CredentialsSource {
+            command: Some(format!("printf '%s' '{}'", DOCUMENT.replace('\n', " "))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn une_commande_configuree_fournit_le_jeton() {
+        let creds = load(&source_commande()).expect("des identifiants");
+        assert_eq!(creds.token, "sk-ant-oat01-factice");
+        assert_eq!(creds.source, "commande configuree");
+    }
+
+    #[test]
+    fn une_commande_qui_echoue_ne_retombe_pas_en_silence_sur_lauto() {
+        // Si l'utilisateur a pris la peine de configurer une source, masquer son
+        // erreur derriere la detection automatique lui ferait chercher longtemps.
+        let source = CredentialsSource {
+            command: Some("exit 3".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(load(&source), Err(Error::Credentials(_))));
+    }
+
+    #[test]
+    fn une_commande_qui_traine_est_coupee() {
+        let debut = Instant::now();
+        let err = run_command("sleep 5", Duration::from_millis(300)).unwrap_err();
+        // Coupee bien avant les 5 secondes du sleep.
+        assert!(debut.elapsed() < Duration::from_secs(2), "pas coupee assez vite");
+        assert!(matches!(err, Error::Credentials(detail) if detail.contains("repondu")));
+    }
+
+    #[test]
+    fn un_jeton_colle_a_la_main_est_accepte_tel_quel() {
+        let source = CredentialsSource {
+            token: Some("sk-ant-oat01-colle".to_string()),
+            ..Default::default()
+        };
+        let creds = load(&source).expect("des identifiants");
+        assert_eq!(creds.token, "sk-ant-oat01-colle");
+        // On ne pretend pas connaitre son expiration.
+        assert_eq!(creds.expires_at, None);
+        assert!(!creds.is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn la_commande_passe_avant_le_jeton() {
+        let source = CredentialsSource {
+            token: Some("jamais-utilise".to_string()),
+            ..source_commande()
+        };
+        assert_eq!(load(&source).unwrap().token, "sk-ant-oat01-factice");
+    }
+
+    #[test]
+    fn une_source_vide_laisse_la_detection_automatique_decider() {
+        assert!(!CredentialsSource::default().is_explicit());
+        assert!(source_commande().is_explicit());
+    }
+
+    #[test]
+    fn un_chemin_illisible_le_dit() {
+        let source = CredentialsSource {
+            path: Some("/absent/pour/de/bon.json".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(load(&source), Err(Error::Credentials(d)) if d.contains("illisible")));
     }
 
     #[test]
