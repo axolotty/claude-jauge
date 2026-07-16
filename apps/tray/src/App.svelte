@@ -86,12 +86,13 @@
   {:else}
     <div class="vide">
       <p>Aucun releve.</p>
-      <p class="pourquoi">
-        Claude Code n'a pas servi depuis plus de 5 h. Sonder maintenant ouvrirait
-        une fenetre de session pour rien.
-      </p>
+      <!-- La raison vient du coeur, jamais d'un texte fige ici : sinon un
+           probleme de jeton s'afficherait comme une simple inactivite. -->
+      {#if releve?.note}
+        <p class="pourquoi">{releve.note}</p>
+      {/if}
       <button class="sonder" onclick={rafraichir} disabled={occupe}>
-        Sonder quand meme
+        Sonder maintenant
       </button>
     </div>
   {/if}
@@ -103,7 +104,14 @@
     {#if releve?.origin === "probed"}
       <span class="point vert-point" title="releve frais"></span>
     {/if}
-    {#if releve?.note}
+    {#if releve?.policy}
+      <span class="politique" title={releve.policy_hint}>
+        sonde {releve.policy}
+      </span>
+    {/if}
+    <!-- Quand il n'y a aucun releve, la raison occupe deja tout le corps de la
+         popover : pas la peine de la repeter ici. -->
+    {#if releve?.note && releve?.windows?.length}
       <span class="note" title={releve.note}>!</span>
     {/if}
   </footer>
@@ -301,8 +309,15 @@
     background: var(--vert);
   }
 
-  .note {
+  .politique {
     margin-left: auto;
+    opacity: 0.7;
+    cursor: help;
+    border-bottom: 1px dotted var(--trace);
+  }
+
+  .note {
+    margin-left: 6px;
     display: grid;
     place-items: center;
     width: 14px;

@@ -5,7 +5,7 @@
 
 use chrono::{Datelike, Local, TimeZone};
 use claude_jauge_core::quota::Health;
-use claude_jauge_core::{human_duration, meter::Origin, Meter, Quota, Reading, Window};
+use claude_jauge_core::{human_duration, meter::Origin, Meter, Policy, Quota, Reading, Window};
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::thread::sleep;
@@ -22,15 +22,28 @@ OPTIONS
     -w, --watch [SECS]   Rafraichit en continu (5 s par defaut). Ctrl+C pour sortir.
     -f, --force          Envoie une sonde meme si rien n'a bouge.
                          Attention : a froid, cela ouvre une fenetre de session de 5h.
+    -p, --policy NOM     `fidele` ou `prudent`, pour cet appel seulement.
+                         Par defaut : la valeur du fichier de reglages.
         --no-color       N'emet aucune couleur.
     -h, --help           Affiche cette aide.
     -V, --version        Affiche la version.
 
 FONCTIONNEMENT
     Les quotas sont lus dans les en-tetes que l'API renvoie sur chacune de ses
-    reponses. Pour ne pas ouvrir de fenetre de session a ta place, la sonde n'est
-    envoyee que si Claude Code a lui-meme parle a l'API depuis le dernier releve ;
-    sinon le compte a rebours est recalcule en local, sans reseau.
+    reponses. Ils valent pour TOUT Claude : claude.ai, l'app de bureau et Claude
+    Code partagent le meme pool.
+
+    Une sonde est une requete, donc elle ouvre une fenetre de session de 5h s'il
+    n'y en a pas deja une. D'ou deux politiques :
+
+      fidele    Sonde toutes les 2 min. Chiffres toujours justes, y compris
+                quand la consommation vient de claude.ai. Peut ouvrir une
+                fenetre quand tu ne travailles pas. C'est le defaut.
+      prudent   Ne sonde que si c'est gratuit : au lancement, sur activite de
+                Claude Code, et tant qu'une fenetre deja ouverte court. N'ouvre
+                jamais rien tout seul, mais peut afficher 0 % apres un reset.
+
+    Entre deux sondes, le compte a rebours est recalcule en local, sans reseau.
 ";
 
 struct Options {
@@ -38,6 +51,8 @@ struct Options {
     force: bool,
     watch: Option<u64>,
     color: bool,
+    /// Impose une politique pour cet appel, sans toucher aux reglages.
+    policy: Option<Policy>,
 }
 
 enum Action {
@@ -52,6 +67,7 @@ fn parse(args: &[String]) -> Result<Action, String> {
         force: false,
         watch: None,
         color: io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+        policy: None,
     };
 
     let mut i = 0;
@@ -62,6 +78,16 @@ fn parse(args: &[String]) -> Result<Action, String> {
             "-j" | "--json" => opts.json = true,
             "-f" | "--force" => opts.force = true,
             "--no-color" => opts.color = false,
+            "-p" | "--policy" => {
+                let nom = args
+                    .get(i + 1)
+                    .ok_or("--policy attend `fidele` ou `prudent`")?;
+                opts.policy = Some(
+                    Policy::parse(nom)
+                        .ok_or_else(|| format!("politique inconnue : {nom} (attendu `fidele` ou `prudent`)"))?,
+                );
+                i += 1;
+            }
             "-w" | "--watch" => {
                 // La valeur est facultative : `--watch` seul vaut 5 secondes.
                 let secs = args
@@ -108,13 +134,14 @@ fn main() -> ExitCode {
         Action::Run(opts) => opts,
     };
 
-    let meter = match Meter::new() {
+    let mut meter = match Meter::new() {
         Ok(meter) => meter,
         Err(err) => {
             eprintln!("claude-jauge : {err}");
             return ExitCode::FAILURE;
         }
     };
+    meter.policy_override = opts.policy;
 
     match opts.watch {
         None => {
@@ -198,6 +225,10 @@ fn en_json(reading: &Reading) -> String {
 
     serde_json::json!({
         "origin": origine,
+        "policy": match reading.policy {
+            Policy::Fidele => "fidele",
+            Policy::Prudent => "prudent",
+        },
         "subscription_type": reading.subscription_type,
         "note": reading.note,
         "quota": quota,
@@ -353,6 +384,8 @@ fn pied(reading: &Reading, quota: &Quota, now: u64, couleur: bool) -> String {
         }
     }
 
+    bouts.push(reading.policy.label().to_lowercase());
+
     let mut out = format!("  {}{}{}\n", c(GRIS), bouts.join(" · "), c(RESET));
     if let Some(note) = &reading.note {
         out.push_str(&format!("  {}{}{}\n", c(AMBRE), note, c(RESET)));
@@ -407,6 +440,26 @@ mod tests {
     fn refuse_une_option_inconnue() {
         let args = vec!["--nawak".to_string()];
         assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn policy_accepte_les_deux_politiques() {
+        let fidele = vec!["--policy".to_string(), "fidele".to_string()];
+        assert!(matches!(parse(&fidele), Ok(Action::Run(o)) if o.policy == Some(Policy::Fidele)));
+
+        let prudent = vec!["-p".to_string(), "prudent".to_string()];
+        assert!(matches!(parse(&prudent), Ok(Action::Run(o)) if o.policy == Some(Policy::Prudent)));
+    }
+
+    #[test]
+    fn policy_refuse_une_valeur_inconnue_ou_absente() {
+        assert!(parse(&["--policy".to_string(), "nawak".to_string()]).is_err());
+        assert!(parse(&["--policy".to_string()]).is_err());
+    }
+
+    #[test]
+    fn sans_policy_on_laisse_les_reglages_decider() {
+        assert!(matches!(parse(&[]), Ok(Action::Run(o)) if o.policy.is_none()));
     }
 
     #[test]

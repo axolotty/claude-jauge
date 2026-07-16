@@ -6,6 +6,10 @@ Un widget de barre de menus (macOS, Linux, Windows) et un CLI headless, qui
 affichent le pourcentage restant et le temps avant la remise a zero des trois
 fenetres de quota : **session 5h**, **semaine 7j** et **overage** mensuel.
 
+Les chiffres valent pour **tout Claude**, pas seulement Claude Code : sur Pro et
+Max, claude.ai, l'app de bureau et Claude Code puisent dans le meme pool. C'est
+le sens du mot `unified` dans le nom des en-tetes.
+
 ![les etats de la jauge](docs/jauge.png)
 
 ## D'ou viennent les chiffres
@@ -29,35 +33,61 @@ est celui que Claude Code a deja pose sur la machine.
 > preavis. Tout est donc optionnel dans le code : un champ absent s'affiche `?`,
 > il ne fait rien planter.
 
-## Ce qui le distingue d'un simple poll
+## Quand sonder : un arbitrage sans bonne reponse
 
 L'idee vient de [Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter), le
 petit ecran ESP32 de Hermann Bjorgvin. Son daemon interroge l'API toutes les
 60 secondes, ce qui a un effet de bord genant : **une sonde est une requete comme
-une autre, donc elle OUVRE une fenetre de 5 heures s'il n'y en a pas deja une en
-cours**. Le widget demarre alors le compteur a ta place, et tu retrouves une
-fenetre deja entamee quand tu te mets enfin au travail.
+une autre, donc elle ouvre une fenetre de 5 heures s'il n'y en a pas deja une en
+cours**. Le widget demarre alors le compteur a ta place.
 
-`claude-jauge` s'appuie sur deux constats :
+L'inverse ne marche pas non plus. On pourrait ne sonder que quand Claude Code a
+ecrit dans `~/.claude/projects`, mais les quotas sont partages avec claude.ai :
+**une conversation dans le navigateur ne laisse aucune trace locale**. Se fier
+aux transcripts, c'est afficher des chiffres faux des que la consommation vient
+d'ailleurs, et n'afficher rien du tout sur une machine ou Claude Code ne tourne
+pas.
 
-1. les compteurs ne bougent que si Claude Code parle a l'API, ce qui laisse une
-   trace datee dans `~/.claude/projects` ;
-2. le compte a rebours et la retombee a zero d'une fenetre echue se calculent
-   parfaitement en local, sans reseau.
+Les deux exigences sont incompatibles, donc c'est un reglage
+([`Policy`](crates/core/src/config.rs)) :
 
-D'ou la regle, dans [`meter::should_probe`](crates/core/src/meter.rs) :
+| | `fidele` (defaut) | `prudent` |
+| --- | --- | --- |
+| Cadence | toutes les 2 min, quoi qu'il arrive | seulement quand c'est gratuit |
+| Suit claude.ai | oui | pendant une fenetre ouverte |
+| Ouvre une fenetre au repos | **oui** | jamais |
+| Apres un reset, au repos | juste | affiche 0 % jusqu'au prochain geste |
 
-| Situation | Sonde ? |
+Sonder est « gratuit » quand une fenetre court deja, ou quand Claude Code a ecrit
+depuis le dernier releve : dans les deux cas la fenetre est ouverte de toute
+facon. Un plancher de 60 s s'applique aux deux politiques, et « Rafraichir »
+sonde toujours.
+
+Entre deux sondes, rien n'est demande au reseau : le compte a rebours et la
+retombee a zero d'une fenetre echue se calculent en local.
+
+> **Une reserve honnete.** Que la sonde ouvre reellement une fenetre repose sur
+> la documentation d'Anthropic (« la fenetre demarre a ton premier message »), et
+> n'a pas ete verifie experimentalement ici : il faudrait observer un compte
+> reste inactif plus de 5 heures. La politique `fidele` est le bon choix dans les
+> deux cas ; `prudent` n'est utile que si l'hypothese est vraie.
+
+### Le reglage
+
+Le widget expose « Sonde fidele » et « Sonde prudente » dans son menu (clic
+droit). Le CLI accepte `--policy fidele|prudent` pour un seul appel.
+
+Le fichier, ecrit par le widget :
+
+```json
+{ "policy": "fidele" }
+```
+
+| Plateforme | Chemin |
 | --- | --- |
-| Claude Code a ecrit depuis le dernier releve | oui |
-| Rien n'a bouge depuis le dernier releve | non, le cache suffit |
-| Moins de 60 s depuis la derniere sonde | non, plancher anti-rafale |
-| Premier lancement, activite il y a moins de 5 h | oui, une fenetre est deja ouverte |
-| Premier lancement, plus rien depuis 5 h | **non**, ca ouvrirait une fenetre pour rien |
-| Clic sur « Rafraichir » | oui, c'est un geste volontaire |
-
-Autrement dit : au repos, zero requete. Le compte a rebours continue pourtant
-d'avancer a l'ecran.
+| Linux | `~/.config/claude-jauge/config.json` |
+| macOS | `~/Library/Application Support/claude-jauge/config.json` |
+| Windows | `%APPDATA%\claude-jauge\config.json` |
 
 ## Architecture
 
@@ -96,6 +126,7 @@ cargo build --release -p claude-jauge-cli
 | `-j, --json` | Sortie JSON, pour une barre de statut ou un script. |
 | `-w, --watch [SECS]` | Rafraichit en continu (5 s par defaut). |
 | `-f, --force` | Sonde meme si rien n'a bouge. A froid, **ouvre une fenetre de 5h**. |
+| `-p, --policy NOM` | `fidele` ou `prudent`, pour cet appel seulement. |
 | `--no-color` | Aucune couleur (`NO_COLOR` est respecte aussi). |
 
 ## Le widget
@@ -108,8 +139,10 @@ npm run tauri build    # paquet distribuable
 ```
 
 * Clic gauche sur l'icone : la popover s'ouvre.
-* Clic droit : « Rafraichir maintenant » et « Quitter ».
+* Clic droit : « Rafraichir maintenant », le choix de la politique, « Quitter ».
 * Le titre a cote de l'icone (`96% · 45m`) s'affiche tel quel dans la barre macOS.
+  Quand il n'y a rien a montrer il vaut `!` (une raison attend dans la popover)
+  ou `...`, jamais un `?` enigmatique.
 * `Echap` referme, `Cmd/Ctrl+R` sonde.
 
 L'icone est un anneau dessine en RGBA a la main, sans bibliotheque de rendu, dans
@@ -149,8 +182,9 @@ donc en consommer un ici risquerait d'invalider la session de Claude Code
 elle-meme. Quand le jeton expire, `claude-jauge` le dit et laisse Claude Code le
 renouveler.
 
-Le seul fichier ecrit est le cache du dernier releve
-(`~/.cache/claude-jauge/state.json` sous Linux).
+Les seuls fichiers ecrits sont le cache du dernier releve
+(`~/.cache/claude-jauge/state.json` sous Linux) et le fichier de reglages. Ni
+l'un ni l'autre ne contient de jeton.
 
 ## Tests
 
@@ -158,7 +192,7 @@ Le seul fichier ecrit est le cache du dernier releve
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-45 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
+59 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
 politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence

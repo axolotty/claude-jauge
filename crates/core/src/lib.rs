@@ -11,6 +11,7 @@
 
 pub mod activity;
 pub mod cache;
+pub mod config;
 pub mod credentials;
 pub mod icon;
 pub mod meter;
@@ -18,6 +19,7 @@ pub mod paths;
 pub mod probe;
 pub mod quota;
 
+pub use config::{Config, Policy};
 pub use credentials::Credentials;
 pub use meter::{Meter, Origin, Reading};
 pub use quota::{human_duration, Quota, Window, WindowKind};

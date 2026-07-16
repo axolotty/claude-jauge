@@ -1,20 +1,23 @@
 //! Orchestration : decider s'il faut sonder, puis rendre un releve.
 //!
-//! Clawdmeter, le petit ecran ESP32 qui a inspire ce projet, interroge l'API
-//! toutes les 60 secondes. C'est simple, mais ca a un defaut : une sonde envoyee
-//! alors qu'on ne travaillait pas OUVRE une fenetre de 5 heures. Le widget
-//! demarre alors le compteur a la place de l'utilisateur, qui retrouve une
-//! fenetre deja entamee quand il se met enfin au travail.
+//! Tout ce module tourne autour d'un arbitrage qui n'a pas de bonne reponse.
 //!
-//! Ici on s'appuie sur deux constats :
+//! Une sonde est une requete comme une autre, donc elle OUVRE une fenetre de
+//! 5 heures s'il n'y en a pas deja une en cours. Clawdmeter, le petit ecran
+//! ESP32 qui a inspire ce projet, interroge l'API toutes les 60 secondes : ses
+//! chiffres sont toujours justes, mais le widget demarre le compteur a la place
+//! de l'utilisateur, qui retrouve une fenetre deja entamee en se mettant au
+//! travail.
 //!
-//! 1. les compteurs ne bougent que si Claude Code parle a l'API, ce qui laisse
-//!    une trace datee dans `~/.claude/projects` ;
-//! 2. le compte a rebours avant reset et la retombee a zero d'une fenetre echue
-//!    se calculent parfaitement en local, sans reseau.
+//! L'inverse ne marche pas non plus. On pourrait ne sonder que quand Claude Code
+//! a ecrit dans `~/.claude/projects`, mais les quotas sont partages avec
+//! claude.ai et l'app de bureau : une conversation dans le navigateur ne laisse
+//! aucune trace locale. Se fier aux transcripts, c'est afficher des chiffres
+//! faux des que la consommation vient d'ailleurs.
 //!
-//! On ne sonde donc que quand un releve apprendrait vraiment quelque chose.
+//! D'ou deux politiques, et un reglage pour choisir. Voir [`Policy`].
 
+use crate::config::{self, Policy};
 use crate::quota::Quota;
 use crate::{activity, cache, credentials, paths, probe, Error};
 use std::path::PathBuf;
@@ -22,11 +25,13 @@ use std::path::PathBuf;
 /// Duree d'une fenetre de session, telle qu'appliquee par l'API.
 pub const FIVE_HOURS: u64 = 5 * 3600;
 
-/// Delai minimal entre deux sondes.
+/// Delai entre deux sondes periodiques.
+pub const POLL_INTERVAL: u64 = 120;
+
+/// Delai minimal entre deux sondes, toutes politiques confondues.
 ///
 /// Pendant une session active, Claude Code ecrit dans son transcript en
-/// permanence. Sans ce plancher, on sonderait a chaque rafraichissement de
-/// l'icone.
+/// permanence. Sans ce plancher, on sonderait a chaque rafraichissement.
 pub const MIN_PROBE_INTERVAL: u64 = 60;
 
 /// D'ou vient le releve affiche.
@@ -36,7 +41,7 @@ pub enum Origin {
     Probed,
     /// Rien n'a bouge : on rejoue le dernier releve, resets appliques.
     Cached,
-    /// Aucun releve connu, et sonder ouvrirait une fenetre pour rien.
+    /// Aucun releve connu, et la politique en cours interdit de sonder.
     Idle,
 }
 
@@ -46,6 +51,8 @@ pub struct Reading {
     /// Le releve, deja recale sur l'heure courante. `None` a froid.
     pub quota: Option<Quota>,
     pub origin: Origin,
+    /// La politique qui a decide de sonder, ou non.
+    pub policy: Policy,
     /// "pro", "max"... pour l'afficher a cote du nom.
     pub subscription_type: Option<String>,
     /// Avertissement non bloquant : sonde en echec, jeton expire, etc.
@@ -54,32 +61,61 @@ pub struct Reading {
 
 /// Faut-il envoyer une sonde ?
 ///
-/// La regle d'or : ne jamais ouvrir une fenetre de 5 heures a la place de
-/// l'utilisateur. Une fonction pure, pour pouvoir la tester sans reseau ni
-/// disque.
+/// Fonction pure, pour pouvoir eprouver la regle sans reseau ni disque.
+///
+/// `window_closes_at` est la date de reset des 5h du dernier releve : elle dit
+/// si une fenetre court encore, donc si sonder est gratuit.
 pub fn should_probe(
+    policy: Policy,
     force: bool,
     last_probe: Option<u64>,
     last_activity: Option<u64>,
+    window_closes_at: Option<u64>,
     now: u64,
 ) -> bool {
+    // Un geste explicite l'emporte sur tout le reste.
     if force {
         return true;
     }
 
-    match last_probe {
-        Some(probe_at) => {
-            // Plancher anti-rafale pendant les sessions actives.
-            if now.saturating_sub(probe_at) < MIN_PROBE_INTERVAL {
-                return false;
-            }
-            // Un releve ne vieillit que si Claude Code a parle depuis.
-            matches!(last_activity, Some(act) if act > probe_at)
+    // Plancher anti-rafale, commun aux deux politiques.
+    if let Some(probe_at) = last_probe {
+        if now.saturating_sub(probe_at) < MIN_PROBE_INTERVAL {
+            return false;
         }
-        // Premier lancement : on ne se risque a sonder que si Claude Code a
-        // servi dans les cinq dernieres heures. Une fenetre est alors deja
-        // ouverte, donc la sonde n'en ouvre pas.
-        None => matches!(last_activity, Some(act) if now.saturating_sub(act) < FIVE_HOURS),
+    }
+
+    match policy {
+        // Toujours juste, quitte a ouvrir une fenetre.
+        Policy::Fidele => match last_probe {
+            // Au lancement on veut un chiffre tout de suite : c'est bien pour ca
+            // que l'utilisateur vient de demarrer le widget.
+            None => true,
+            Some(probe_at) => now.saturating_sub(probe_at) >= POLL_INTERVAL,
+        },
+
+        // Ne sonder que quand c'est gratuit.
+        Policy::Prudent => {
+            // Claude Code a parle depuis le dernier releve : les compteurs ont
+            // forcement bouge, et une fenetre est forcement ouverte.
+            if let (Some(probe_at), Some(act)) = (last_probe, last_activity) {
+                if act > probe_at {
+                    return true;
+                }
+            }
+
+            match last_probe {
+                // A froid : seulement si Claude Code a servi dans les 5 dernieres
+                // heures, donc qu'une fenetre est deja ouverte.
+                None => matches!(last_activity, Some(act) if now.saturating_sub(act) < FIVE_HOURS),
+                // Ensuite : tant que la fenetre connue court, sonder ne coute
+                // rien. Une fois fermee, on se tait.
+                Some(probe_at) => {
+                    let fenetre_ouverte = matches!(window_closes_at, Some(at) if at > now);
+                    fenetre_ouverte && now.saturating_sub(probe_at) >= POLL_INTERVAL
+                }
+            }
+        }
     }
 }
 
@@ -90,6 +126,10 @@ pub struct Meter {
     pub projects_dir: PathBuf,
     /// Ou l'on garde le dernier releve.
     pub cache_file: PathBuf,
+    /// Ou l'on garde les reglages.
+    pub config_file: PathBuf,
+    /// Politique imposee pour cet appel, qui court-circuite les reglages.
+    pub policy_override: Option<Policy>,
 }
 
 impl Meter {
@@ -98,39 +138,60 @@ impl Meter {
         Ok(Meter {
             projects_dir: paths::projects_dir()?,
             cache_file: paths::cache_file()?,
+            config_file: paths::config_file()?,
+            policy_override: None,
         })
+    }
+
+    /// La politique en vigueur.
+    ///
+    /// Relue a chaque fois, et non gardee en memoire : la bascule du menu ecrit
+    /// le fichier, et le tour de boucle suivant doit en tenir compte.
+    pub fn policy(&self) -> Policy {
+        self.policy_override
+            .unwrap_or_else(|| config::load(&self.config_file).policy)
+    }
+
+    /// Change la politique et l'ecrit sur le disque.
+    pub fn set_policy(&self, policy: Policy) -> std::io::Result<()> {
+        config::store(&self.config_file, &config::Config { policy })
     }
 
     /// Rend l'etat courant des quotas.
     ///
     /// `force` envoie une sonde quoi qu'il arrive : a reserver a une action
-    /// explicite de l'utilisateur, puisque ca peut ouvrir une fenetre de 5h.
+    /// explicite de l'utilisateur, puisque cela peut ouvrir une fenetre de 5h.
     pub fn read(&self, force: bool) -> Reading {
         let now = crate::now();
+        let policy = self.policy();
         let cached = cache::load(&self.cache_file);
         let last_activity = activity::last_activity(&self.projects_dir);
         let last_probe = cached.as_ref().map(|q| q.probed_at);
+        let window_closes_at = cached.as_ref().and_then(|q| q.five_hour.reset_at);
 
-        // Le type d'abonnement se lit en local, sans reseau : son absence n'est
-        // pas une raison d'echouer.
+        // Le type d'abonnement se lit en local : son absence n'est pas une
+        // raison d'echouer.
         let creds = credentials::load();
         let subscription_type = creds
             .as_ref()
             .ok()
             .and_then(|c| c.subscription_type.clone());
 
-        if should_probe(force, last_probe, last_activity, now) {
-            match creds.as_ref().map_err(|e| e.to_string()).and_then(|c| {
-                probe::probe(c, now).map_err(|e| e.to_string())
-            }) {
+        if should_probe(policy, force, last_probe, last_activity, window_closes_at, now) {
+            match creds
+                .as_ref()
+                .map_err(|err| err.to_string())
+                .and_then(|c| probe::probe(c, now).map_err(|err| err.to_string()))
+            {
                 Ok(fresh) => {
                     // Un cache en echec n'a pas a casser l'affichage.
                     let note = cache::store(&self.cache_file, &fresh)
                         .err()
-                        .map(|e| format!("releve non mis en cache : {e}"));
+                        .map(|err| format!("releve non mis en cache : {err}"));
                     return Reading {
                         quota: Some(fresh.settled(now)),
                         origin: Origin::Probed,
+                        policy,
                         subscription_type,
                         note,
                     };
@@ -140,7 +201,12 @@ impl Meter {
                     // ecran vide.
                     return Reading {
                         quota: cached.map(|q| q.settled(now)),
-                        origin: if last_probe.is_some() { Origin::Cached } else { Origin::Idle },
+                        origin: if last_probe.is_some() {
+                            Origin::Cached
+                        } else {
+                            Origin::Idle
+                        },
+                        policy,
                         subscription_type,
                         note: Some(detail),
                     };
@@ -152,16 +218,19 @@ impl Meter {
             Some(quota) => Reading {
                 quota: Some(quota.settled(now)),
                 origin: Origin::Cached,
+                policy,
                 subscription_type,
                 note: None,
             },
             None => Reading {
                 quota: None,
                 origin: Origin::Idle,
+                policy,
                 subscription_type,
                 note: Some(
-                    "aucun releve : Claude Code n'a pas servi depuis plus de 5h, et sonder \
-                     maintenant ouvrirait une fenetre de session pour rien."
+                    "aucun releve : en sonde prudente, Claude Code doit avoir servi \
+                     dans les 5 dernieres heures pour qu'une sonde soit gratuite. \
+                     Rafraichis a la main, ou passe en sonde fidele."
                         .to_string(),
                 ),
             },
@@ -175,66 +244,135 @@ mod tests {
 
     const MAINTENANT: u64 = 1_784_225_000;
 
-    #[test]
-    fn force_sonde_toujours() {
-        // Meme a froid, meme sans la moindre activite.
-        assert!(should_probe(true, None, None, MAINTENANT));
-        // Meme juste apres un releve tout frais.
-        assert!(should_probe(true, Some(MAINTENANT), Some(MAINTENANT), MAINTENANT));
+    /// Raccourci : sonde prudente.
+    fn prudent(
+        last_probe: Option<u64>,
+        last_activity: Option<u64>,
+        window_closes_at: Option<u64>,
+    ) -> bool {
+        should_probe(
+            Policy::Prudent,
+            false,
+            last_probe,
+            last_activity,
+            window_closes_at,
+            MAINTENANT,
+        )
+    }
+
+    /// Raccourci : sonde fidele.
+    fn fidele(last_probe: Option<u64>) -> bool {
+        should_probe(Policy::Fidele, false, last_probe, None, None, MAINTENANT)
     }
 
     #[test]
-    fn a_froid_sans_activite_on_ne_sonde_pas() {
-        // C'est la regle d'or : ne pas ouvrir de fenetre a la place de l'utilisateur.
-        assert!(!should_probe(false, None, None, MAINTENANT));
+    fn force_sonde_toujours_quelle_que_soit_la_politique() {
+        for politique in [Policy::Fidele, Policy::Prudent] {
+            assert!(should_probe(politique, true, None, None, None, MAINTENANT));
+            assert!(should_probe(
+                politique,
+                true,
+                Some(MAINTENANT),
+                Some(MAINTENANT),
+                None,
+                MAINTENANT
+            ));
+        }
+    }
+
+    // --- Sonde fidele ----------------------------------------------------
+
+    #[test]
+    fn fidele_sonde_des_le_lancement_meme_sans_activite() {
+        // C'est tout l'interet : l'utilisateur vient de lancer le widget, il veut
+        // un chiffre. Et sa consommation peut venir de claude.ai, qui ne laisse
+        // aucune trace locale.
+        assert!(fidele(None));
     }
 
     #[test]
-    fn a_froid_on_sonde_si_une_fenetre_est_probablement_ouverte() {
-        // Claude Code a servi il y a 10 minutes : une fenetre court deja.
-        let recent = MAINTENANT - 600;
-        assert!(should_probe(false, None, Some(recent), MAINTENANT));
+    fn fidele_sonde_a_intervalle_regulier() {
+        assert!(!fidele(Some(MAINTENANT - POLL_INTERVAL + 1)));
+        assert!(fidele(Some(MAINTENANT - POLL_INTERVAL)));
+        assert!(fidele(Some(MAINTENANT - 3600)));
     }
 
     #[test]
-    fn a_froid_on_ne_sonde_pas_si_la_derniere_activite_est_trop_vieille() {
-        // Plus de 5h sans rien : la fenetre est retombee, sonder en rouvrirait une.
-        let vieux = MAINTENANT - FIVE_HOURS - 1;
-        assert!(!should_probe(false, None, Some(vieux), MAINTENANT));
+    fn fidele_sonde_meme_fenetre_fermee() {
+        // La difference de fond avec la politique prudente : on accepte d'ouvrir
+        // une fenetre pour ne pas afficher un chiffre faux.
+        let fenetre_fermee = Some(MAINTENANT - 1);
+        assert!(should_probe(
+            Policy::Fidele,
+            false,
+            Some(MAINTENANT - POLL_INTERVAL),
+            None,
+            fenetre_fermee,
+            MAINTENANT
+        ));
+    }
 
+    // --- Sonde prudente --------------------------------------------------
+
+    #[test]
+    fn prudent_a_froid_sans_activite_ne_sonde_pas() {
+        // La regle d'or : ne pas ouvrir de fenetre a la place de l'utilisateur.
+        assert!(!prudent(None, None, None));
+    }
+
+    #[test]
+    fn prudent_a_froid_sonde_si_une_fenetre_est_probablement_ouverte() {
+        assert!(prudent(None, Some(MAINTENANT - 600), None));
+    }
+
+    #[test]
+    fn prudent_a_froid_ne_sonde_pas_si_lactivite_est_trop_vieille() {
+        assert!(!prudent(None, Some(MAINTENANT - FIVE_HOURS - 1), None));
         // Pile a la limite, on s'abstient aussi.
-        let limite = MAINTENANT - FIVE_HOURS;
-        assert!(!should_probe(false, None, Some(limite), MAINTENANT));
+        assert!(!prudent(None, Some(MAINTENANT - FIVE_HOURS), None));
     }
 
     #[test]
-    fn on_resonde_quand_claude_a_parle_depuis_le_dernier_releve() {
+    fn prudent_resonde_quand_claude_code_a_parle_depuis_le_dernier_releve() {
         let probe_at = MAINTENANT - 300;
-        let activite = probe_at + 10;
-        assert!(should_probe(false, Some(probe_at), Some(activite), MAINTENANT));
+        assert!(prudent(Some(probe_at), Some(probe_at + 10), None));
     }
 
     #[test]
-    fn on_ne_resonde_pas_si_rien_na_bouge() {
+    fn prudent_sonde_tant_que_la_fenetre_connue_court() {
+        // Sonder est gratuit : la fenetre est deja ouverte. C'est ce qui permet
+        // de voir la consommation de claude.ai pendant une session en cours.
+        let probe_at = MAINTENANT - POLL_INTERVAL;
+        let fenetre_ouverte = Some(MAINTENANT + 3600);
+        assert!(prudent(Some(probe_at), None, fenetre_ouverte));
+    }
+
+    #[test]
+    fn prudent_se_tait_des_que_la_fenetre_est_fermee() {
+        let probe_at = MAINTENANT - POLL_INTERVAL;
+        assert!(!prudent(Some(probe_at), None, Some(MAINTENANT - 1)));
+        assert!(!prudent(Some(probe_at), None, Some(MAINTENANT)));
+        // Fenetre inconnue : on ne parie pas.
+        assert!(!prudent(Some(probe_at), None, None));
+    }
+
+    #[test]
+    fn prudent_ne_resonde_pas_si_rien_na_bouge() {
         let probe_at = MAINTENANT - 300;
-        // Derniere activite anterieure au releve : les compteurs n'ont pas change.
-        assert!(!should_probe(false, Some(probe_at), Some(probe_at - 60), MAINTENANT));
+        assert!(!prudent(Some(probe_at), Some(probe_at - 60), None));
         // Activite pile au moment du releve : deja prise en compte.
-        assert!(!should_probe(false, Some(probe_at), Some(probe_at), MAINTENANT));
-        // Aucune activite connue.
-        assert!(!should_probe(false, Some(probe_at), None, MAINTENANT));
+        assert!(!prudent(Some(probe_at), Some(probe_at), None));
     }
 
-    #[test]
-    fn le_plancher_evite_les_rafales_pendant_une_session_active() {
-        // Claude Code ecrit en continu, mais on vient de sonder il y a 5 s.
-        let probe_at = MAINTENANT - 5;
-        let activite = MAINTENANT;
-        assert!(!should_probe(false, Some(probe_at), Some(activite), MAINTENANT));
+    // --- Commun ----------------------------------------------------------
 
-        // Passe le plancher, la meme situation redevient sondable.
-        let vieux_probe = MAINTENANT - MIN_PROBE_INTERVAL;
-        assert!(should_probe(false, Some(vieux_probe), Some(MAINTENANT), MAINTENANT));
+    #[test]
+    fn le_plancher_evite_les_rafales_dans_les_deux_politiques() {
+        let tout_frais = Some(MAINTENANT - 5);
+        // Fidele : le plancher passe avant l'intervalle.
+        assert!(!fidele(tout_frais));
+        // Prudent : meme une activite toute fraiche ne force pas la main.
+        assert!(!prudent(tout_frais, Some(MAINTENANT), Some(MAINTENANT + 3600)));
     }
 
     #[test]
@@ -242,6 +380,7 @@ mod tests {
         // Un releve date du futur (NTP qui recale, veille prolongee...) :
         // saturating_sub evite le debordement, et on s'abstient simplement.
         let futur = MAINTENANT + 10_000;
-        assert!(!should_probe(false, Some(futur), Some(MAINTENANT), MAINTENANT));
+        assert!(!fidele(Some(futur)));
+        assert!(!prudent(Some(futur), Some(MAINTENANT), None));
     }
 }

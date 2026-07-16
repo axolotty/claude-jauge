@@ -35,6 +35,36 @@ pub fn cache_file() -> Result<PathBuf, Error> {
     Ok(cache_dir()?.join("state.json"))
 }
 
+/// Le fichier de reglages.
+pub fn config_file() -> Result<PathBuf, Error> {
+    Ok(config_dir()?.join("config.json"))
+}
+
+/// Le dossier de configuration, selon les conventions de chaque plateforme.
+///
+/// Distinct du cache : on peut jeter le cache sans perdre les reglages.
+pub fn config_dir() -> Result<PathBuf, Error> {
+    if cfg!(target_os = "macos") {
+        return Ok(home()?
+            .join("Library")
+            .join("Application Support")
+            .join(APP));
+    }
+    if cfg!(windows) {
+        if let Some(roaming) = env::var_os("APPDATA") {
+            return Ok(PathBuf::from(roaming).join(APP));
+        }
+        return Ok(home()?.join("AppData").join("Roaming").join(APP));
+    }
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
+        let xdg = PathBuf::from(xdg);
+        if xdg.is_absolute() {
+            return Ok(xdg.join(APP));
+        }
+    }
+    Ok(home()?.join(".config").join(APP))
+}
+
 /// Le dossier de cache, selon les conventions de chaque plateforme.
 pub fn cache_dir() -> Result<PathBuf, Error> {
     if cfg!(target_os = "macos") {

@@ -4,11 +4,11 @@
 mod icon;
 
 use claude_jauge_core::quota::Health;
-use claude_jauge_core::{human_duration, meter::Origin, Meter, Window};
+use claude_jauge_core::{human_duration, meter::Origin, Meter, Policy, Window};
 use std::time::Duration;
-use tauri::menu::MenuBuilder;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, Wry};
 
 const TRAY_ID: &str = "claude-jauge";
 
@@ -38,11 +38,28 @@ struct Snapshot {
     windows: Vec<WindowView>,
     plan: Option<String>,
     origin: String,
+    policy: String,
+    policy_hint: String,
     note: Option<String>,
     probed_at: Option<u64>,
     age: Option<u64>,
     fallback_percent: Option<f64>,
     now: u64,
+}
+
+/// Les deux entrees cochables du menu, gardees pour pouvoir bouger les coches
+/// quand la politique change.
+struct MenuPolitique {
+    fidele: CheckMenuItem<Wry>,
+    prudent: CheckMenuItem<Wry>,
+}
+
+impl MenuPolitique {
+    /// Aligne les coches sur la politique en vigueur.
+    fn refleter(&self, policy: Policy) {
+        let _ = self.fidele.set_checked(policy == Policy::Fidele);
+        let _ = self.prudent.set_checked(policy == Policy::Prudent);
+    }
 }
 
 fn view(w: &Window, now: u64) -> WindowView {
@@ -82,6 +99,12 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
             Origin::Idle => "idle",
         }
         .to_string(),
+        policy: match reading.policy {
+            Policy::Fidele => "fidele",
+            Policy::Prudent => "prudent",
+        }
+        .to_string(),
+        policy_hint: reading.policy.hint().to_string(),
         note: reading.note.clone(),
         probed_at: reading.quota.as_ref().map(|q| q.probed_at),
         age: reading.quota.as_ref().map(|q| q.age(now)),
@@ -92,14 +115,21 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
 
 /// Le texte affiche a cote de l'icone. La barre de menus macOS le montre tel
 /// quel ; ailleurs il sert d'infobulle.
+///
+/// Un widget muet est un widget casse : quand il n'y a rien a montrer, le titre
+/// doit dire pourquoi, pas afficher un « ? » enigmatique. Le detail complet
+/// attend dans la popover.
 fn titre(snap: &Snapshot) -> String {
     match snap.windows.iter().find(|w| w.key == "5h") {
         Some(w) => match (w.used, w.seconds_left) {
             (Some(used), Some(left)) => format!("{:.0}% · {}", used, human_duration(left)),
             (Some(used), None) => format!("{used:.0}%"),
-            _ => "?".to_string(),
+            _ => "-".to_string(),
         },
-        None => "?".to_string(),
+        // Pas de releve du tout : soit la sonde a echoue (jeton, reseau), soit
+        // la politique prudente s'abstient. Les deux cas se disent.
+        None if snap.note.is_some() => "!".to_string(),
+        None => "...".to_string(),
     }
 }
 
@@ -129,6 +159,19 @@ fn infobulle(snap: &Snapshot) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Applique une nouvelle politique : disque, coches du menu, releve immediat.
+fn changer_politique(app: &AppHandle, policy: Policy) {
+    let meter = app.state::<Meter>();
+    if let Err(err) = meter.set_policy(policy) {
+        eprintln!("claude-jauge : reglage non enregistre : {err}");
+    }
+    app.state::<MenuPolitique>().refleter(policy);
+    // Passer en sonde fidele doit donner un chiffre tout de suite, sans attendre
+    // le prochain tour de boucle.
+    let snap = snapshot(&meter, false);
+    pousser(app, &snap);
 }
 
 /// Montre ou cache la popover.
@@ -179,13 +222,37 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            app.manage(Meter::new()?);
+            let meter = Meter::new()?;
+            let policy = meter.policy();
+            app.manage(meter);
 
-            let menu = MenuBuilder::new(app)
-                .text("refresh", "Rafraichir maintenant")
-                .separator()
-                .text("quit", "Quitter")
-                .build()?;
+            let rafraichir =
+                MenuItem::with_id(app, "refresh", "Rafraichir maintenant", true, None::<&str>)?;
+            let fidele = CheckMenuItem::with_id(
+                app,
+                "policy_fidele",
+                Policy::Fidele.label(),
+                true,
+                policy == Policy::Fidele,
+                None::<&str>,
+            )?;
+            let prudent = CheckMenuItem::with_id(
+                app,
+                "policy_prudent",
+                Policy::Prudent.label(),
+                true,
+                policy == Policy::Prudent,
+                None::<&str>,
+            )?;
+            let quitter = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
+            let sep_haut = PredefinedMenuItem::separator(app)?;
+            let sep_bas = PredefinedMenuItem::separator(app)?;
+
+            let menu = Menu::with_items(
+                app,
+                &[&rafraichir, &sep_haut, &fidele, &prudent, &sep_bas, &quitter],
+            )?;
+            app.manage(MenuPolitique { fidele, prudent });
 
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(icon::gauge(None))
@@ -197,6 +264,8 @@ fn main() {
                         let snap = snapshot(&app.state::<Meter>(), true);
                         pousser(app, &snap);
                     }
+                    "policy_fidele" => changer_politique(app, Policy::Fidele),
+                    "policy_prudent" => changer_politique(app, Policy::Prudent),
                     "quit" => app.exit(0),
                     _ => {}
                 })
