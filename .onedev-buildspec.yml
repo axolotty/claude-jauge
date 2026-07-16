@@ -35,7 +35,9 @@ jobs:
     useTTY: true
     condition: SUCCESSFUL
   triggers:
-  - !BranchUpdateTrigger {}
+  - !BranchUpdateTrigger
+    # Obligatoire. `anyone` : peu importe qui pousse, les tests tournent.
+    userMatch: anyone
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
