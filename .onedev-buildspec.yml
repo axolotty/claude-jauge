@@ -1,4 +1,4 @@
-version: 53
+version: 52
 
 # CI OneDev. Elle ne s'occupe que de ce qu'une machine Linux sait faire :
 # eprouver le coeur, et produire le binaire CLI.
