@@ -1,0 +1,29 @@
+[package]
+name = "claude-jauge-tray"
+description = "Widget de barre de menus : la jauge de consommation Claude, toujours sous les yeux."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+authors = ["axolotty"]
+
+# Ce paquet est volontairement hors du workspace racine : il se lie a
+# webkit2gtk, donc l'inclure casserait `cargo test` sur une machine sans serveur
+# graphique. Il depend du coeur par chemin.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+claude-jauge-core = { path = "../../../crates/core" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

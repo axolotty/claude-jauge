@@ -1,0 +1,21 @@
+[package]
+name = "claude-jauge-cli"
+description = "claude-jauge en ligne de commande : la meme jauge, sans serveur graphique."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "claude-jauge"
+path = "src/main.rs"
+
+[dependencies]
+claude-jauge-core = { path = "../core" }
+serde_json.workspace = true
+
+# Uniquement pour afficher l'heure du reset dans le fuseau local. Le coeur, lui,
+# ne manipule que des epochs et n'en a pas besoin. L'app Tauri s'en passe aussi :
+# cote Svelte, `Date` fait deja le travail.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

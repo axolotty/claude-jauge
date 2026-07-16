@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+# L'app Tauri est volontairement hors du workspace : elle se lie a webkit2gtk,
+# donc l'inclure ferait echouer `cargo test` a la racine sur toute machine sans
+# serveur graphique (un serveur headless, une CI...). Le coeur et le CLI, eux,
+# se compilent et se testent partout. L'app la-bas depend du coeur par chemin.
+exclude = ["apps/tray/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["axolotty"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "claude-jauge-core"
+description = "Coeur de claude-jauge : lecture du jeton, sonde des quotas, cache et politique de releve."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+# Client HTTP bloquant et leger. On le prend en rustls plutot qu'en native-tls
+# pour ne rien exiger du systeme (pas d'OpenSSL a installer sur l'hote).
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

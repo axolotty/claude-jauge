@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.orig
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Tauri
+apps/tray/src-tauri/gen/
+
+# Apercus jetables produits par `cargo run --example apercu`
+apercu-*.rgba
