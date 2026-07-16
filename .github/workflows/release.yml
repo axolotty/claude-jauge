@@ -5,10 +5,9 @@
 # net, et decrit dans .onedev-buildspec.yml : la-bas les tests et le binaire CLI
 # a chaque push, ici les paquets a chaque tag.
 #
-#   git tag v0.2.0 && git push --tags
+#   git tag v0.2.0 && git push github v0.2.0
 #
-# La release est creee en brouillon : rien n'est publie avant que tu l'aies
-# relue et validee a la main.
+# La release est creee en brouillon : rien n'est publie avant relecture.
 
 name: release
 
@@ -18,7 +17,47 @@ on:
       - "v*"
 
 jobs:
+  # Le brouillon est cree UNE fois, avant la matrice.
+  #
+  # Sans ce job, chaque instance de tauri-action cree la release si elle ne la
+  # voit pas encore : quatre jobs lances ensemble se marchent dessus et on
+  # obtient deux releases pour le meme tag, avec les paquets eparpilles entre
+  # les deux. C'est arrive en v0.1.0. `releaseId` ci-dessous rattache tout le
+  # monde au meme brouillon.
+  brouillon:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      id: ${{ steps.creer.outputs.id }}
+    steps:
+      - name: creer le brouillon
+        id: creer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          # Idempotent : relancer le workflow ne doit pas fabriquer un doublon.
+          # On liste au lieu d'interroger /releases/tags/{tag}, qui ignore les
+          # brouillons.
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+                 --jq "[.[] | select(.tag_name == \"${TAG}\" and .draft)] | first | .id")
+          if [ -z "$id" ] || [ "$id" = "null" ]; then
+            id=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+                   -f tag_name="${TAG}" \
+                   -f name="claude-jauge ${TAG}" \
+                   -f body="Paquets construits automatiquement. Voir le README pour l'installation." \
+                   -F draft=true -F prerelease=false \
+                   --jq '.id')
+            echo "brouillon cree : $id"
+          else
+            echo "brouillon deja present : $id"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   paquets:
+    needs: brouillon
     permissions:
       contents: write
 
@@ -50,11 +89,11 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -90,11 +129,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/tray
-          tagName: ${{ github.ref_name }}
-          releaseName: "claude-jauge ${{ github.ref_name }}"
-          releaseBody: "Paquets construits automatiquement. Voir le README pour l'installation."
-          releaseDraft: true
-          prerelease: false
+          # L'id, et non le tag : c'est ce qui interdit a l'action d'en creer une.
+          releaseId: ${{ needs.brouillon.outputs.id }}
           args: ${{ matrix.args }}
 
       # Le CLI voyage a part : c'est lui qui porte `claude-jauge statusline`,
@@ -113,8 +149,12 @@ jobs:
           [ -f "$chemin.exe" ] && chemin="$chemin.exe"
           cp "$chemin" "${{ matrix.nom_cli }}"
 
-      - name: joindre le CLI a la release
+      - name: joindre le CLI au brouillon
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "${{ matrix.nom_cli }}" --clobber
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # `gh release upload <tag>` sait viser un brouillon (verifie), et le
+          # tag ne porte plus qu'une seule release grace au job `brouillon`.
+          gh release upload "${{ github.ref_name }}" "${{ matrix.nom_cli }}" --clobber

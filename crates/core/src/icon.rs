@@ -53,6 +53,30 @@ fn ring_coverage(r: f64, inner: f64, outer: f64) -> f64 {
     dehors.min(dedans)
 }
 
+/// Part d'un pixel couverte par l'arc rempli, entre 0 et 1.
+///
+/// Sans ce degrade, le bout de l'arc avance par marches d'un pixel entier, ce
+/// qui se voit d'autant plus que les flancs de l'anneau, eux, sont lisses.
+///
+/// La largeur du degrade depend du rayon : plus on s'eloigne du centre, plus un
+/// pixel couvre un angle etroit. A la distance `r`, un pixel vaut environ
+/// `1 / (r * 2pi)` tour, et on centre la rampe sur la frontiere.
+fn arc_coverage(position: f64, part: f64, r: f64) -> f64 {
+    // Une jauge pleine n'a pas de bout : lisser fabriquerait une couture a midi.
+    if part >= 1.0 {
+        return 1.0;
+    }
+    if part <= 0.0 {
+        return 0.0;
+    }
+    let rampe = if r > 1.0 {
+        1.0 / (r * std::f64::consts::TAU)
+    } else {
+        1.0
+    };
+    ((part - position) / rampe + 0.5).clamp(0.0, 1.0)
+}
+
 fn draw(utilization: Option<f64>, couleur: (u8, u8, u8), size: u32) -> Vec<u8> {
     let mut buf = vec![0u8; (size as usize) * (size as usize) * 4];
 
@@ -79,17 +103,22 @@ fn draw(utilization: Option<f64>, couleur: (u8, u8, u8), size: u32) -> Vec<u8> {
                 (dy.atan2(dx) + std::f64::consts::FRAC_PI_2).rem_euclid(std::f64::consts::TAU);
             let position = angle / std::f64::consts::TAU;
 
-            let (rgb, alpha) = if position <= part {
-                (couleur, 1.0)
-            } else {
-                // La portion non consommee reste visible, en retrait.
-                (GRIS, 0.28)
+            // Composition de deux couches : l'arc rempli par-dessus la portion
+            // non consommee, qui reste visible en retrait.
+            let arc = arc_coverage(position, part, r);
+            const ALPHA_VIDE: f64 = 0.28;
+
+            let alpha = arc + (1.0 - arc) * ALPHA_VIDE;
+            // Melange en alpha premultiplie, sinon la teinte derive sur le bord.
+            let melange = |devant: u8, derriere: u8| -> u8 {
+                let v = (arc * devant as f64 + (1.0 - arc) * ALPHA_VIDE * derriere as f64) / alpha;
+                v.round().clamp(0.0, 255.0) as u8
             };
 
             let i = ((y * size + x) * 4) as usize;
-            buf[i] = rgb.0;
-            buf[i + 1] = rgb.1;
-            buf[i + 2] = rgb.2;
+            buf[i] = melange(couleur.0, GRIS.0);
+            buf[i + 1] = melange(couleur.1, GRIS.1);
+            buf[i + 2] = melange(couleur.2, GRIS.2);
             buf[i + 3] = (alpha * couverture * 255.0).round() as u8;
         }
     }
@@ -161,6 +190,39 @@ mod tests {
         assert_eq!(teinte(None), GRIS);
         let buf = draw(None, teinte(None), 64);
         assert_eq!(rgb(&buf, 64, 60, 32), GRIS);
+    }
+
+    #[test]
+    fn le_bout_de_larc_est_adouci() {
+        // Un pixel pile sur la frontiere doit etre a mi-chemin entre les deux
+        // couleurs, pas d'un cote ou de l'autre : c'est tout l'anticrenelage.
+        assert_eq!(arc_coverage(0.25, 0.25, 24.0), 0.5);
+        // Nettement avant : plein. Nettement apres : vide.
+        assert_eq!(arc_coverage(0.20, 0.25, 24.0), 1.0);
+        assert_eq!(arc_coverage(0.30, 0.25, 24.0), 0.0);
+    }
+
+    #[test]
+    fn la_rampe_se_resserre_quand_le_rayon_grandit() {
+        // Un pixel couvre un angle d'autant plus etroit qu'il est loin du
+        // centre : le degrade doit suivre, sinon il baverait sur le pourtour.
+        //
+        // On vise un point juste au-dela de la frontiere : assez proche pour
+        // tomber dans la rampe large du petit rayon, assez loin pour etre deja
+        // sorti de la rampe etroite du grand.
+        let pres = arc_coverage(0.255, 0.25, 8.0);
+        let loin = arc_coverage(0.255, 0.25, 30.0);
+        assert!(pres > 0.0, "la rampe large devrait encore couvrir : {pres}");
+        assert_eq!(loin, 0.0, "la rampe etroite devrait etre finie : {loin}");
+    }
+
+    #[test]
+    fn une_jauge_pleine_na_pas_de_couture_a_midi() {
+        // A 100 %, lisser le bout creerait un liseré pale pile sur le depart.
+        assert_eq!(arc_coverage(0.999, 1.0, 24.0), 1.0);
+        let buf = draw(Some(100.0), ROUGE, 64);
+        // Juste a gauche du haut, donc en toute fin d'arc : plein et opaque.
+        assert_eq!(rgb(&buf, 64, 30, 4), ROUGE);
     }
 
     #[test]
