@@ -16,7 +16,7 @@ jobs:
     cloneCredential: !DefaultCredential {}
     withLfs: false
     withSubmodules: false
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
   - !CommandStep
     name: cargo test
     runInContainer: true
@@ -28,7 +28,7 @@ jobs:
         # etre repare en silence dans son dos.
         cargo test --workspace --locked
     useTTY: true
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
   triggers:
   - !BranchUpdateTrigger {}
   retryCondition: never
@@ -43,7 +43,7 @@ jobs:
     cloneCredential: !DefaultCredential {}
     withLfs: false
     withSubmodules: false
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
   - !CommandStep
     name: tester puis compiler
     runInContainer: true
@@ -59,12 +59,12 @@ jobs:
         cp target/release/claude-jauge artefacts/claude-jauge-linux-x86_64
         ./artefacts/claude-jauge-linux-x86_64 --version
     useTTY: true
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
   - !PublishArtifactStep
     name: publier le binaire
     sourcePath: artefacts
     artifacts: '**'
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
   triggers:
   - !TagCreateTrigger {}
   retryCondition: never
