@@ -339,11 +339,13 @@ impl Meter {
             window_closes_at,
             now,
         ) {
-            match creds
-                .as_ref()
-                .map_err(|err| err.to_string())
-                .and_then(|c| probe::probe(c, now).map_err(|err| err.to_string()))
-            {
+            match creds.as_ref().map_err(|err| err.to_string()).and_then(|c| {
+                // On dit d'ou sort le jeton en cas d'echec. Sans ca, un jeton
+                // perime oublie dans un trousseau ressemble trait pour trait a
+                // un jeton perime venu d'ailleurs, et on cherche longtemps.
+                probe::probe(c, now)
+                    .map_err(|err| format!("{err} [jeton lu depuis : {}]", c.source))
+            }) {
                 Ok(fresh) => {
                     // Un cache en echec n'a pas a casser l'affichage.
                     let note = cache::store(&self.cache_file, &fresh)

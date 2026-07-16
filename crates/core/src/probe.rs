@@ -48,13 +48,38 @@ pub fn probe(creds: &Credentials, now: u64) -> Result<Quota, Error> {
 
     match request.send_json(body) {
         Ok(response) => read(&response, now),
-        // Seule reponse qui tranche vraiment la question du jeton.
-        Err(ureq::Error::Status(401, _)) => Err(Error::TokenExpired),
+        // Un 401 dit que le jeton est refuse, pas pourquoi : expire, revoque,
+        // mal forme, scope insuffisant... Traduire ce statut en une cause
+        // precise serait une invention. On rapporte donc ce que l'API dit,
+        // elle seule le sait.
+        Err(ureq::Error::Status(401, response)) => {
+            let detail = response.into_string().unwrap_or_default();
+            Err(Error::Unauthorized(resume(&detail)))
+        }
         // Un refus de quota, lui, porte justement les en-tetes qui nous
         // interessent le plus : c'est quand le quota est epuise qu'on veut
         // savoir quand il revient.
         Err(ureq::Error::Status(_, response)) => read(&response, now),
         Err(err) => Err(Error::Probe(err.to_string())),
+    }
+}
+
+/// Tire le message d'erreur du corps de la reponse.
+///
+/// L'API repond `{"type":"error","error":{"type":"...","message":"..."}}`. On
+/// n'en veut que le message, et jamais plus d'une ligne : ca finit dans une
+/// popover de 300 pixels.
+fn resume(corps: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(corps)
+        .ok()
+        .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+        .unwrap_or_else(|| corps.trim().to_string());
+
+    let message = message.replace('\n', " ");
+    if message.len() > 160 {
+        format!("{}...", &message[..160])
+    } else {
+        message
     }
 }
 
@@ -64,4 +89,39 @@ fn read(response: &ureq::Response, now: u64) -> Result<Quota, Error> {
         now,
     )
     .ok_or(Error::NoQuotaHeaders)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tire_le_message_derreur_de_lapi() {
+        let corps = r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}"#;
+        assert_eq!(resume(corps), "OAuth token has expired");
+    }
+
+    #[test]
+    fn un_corps_inattendu_est_rendu_tel_quel() {
+        // L'API peut changer de forme, ou un intermediaire repondre a sa place :
+        // mieux vaut montrer le brut que d'avaler l'information.
+        assert_eq!(resume("  Gateway timeout  "), "Gateway timeout");
+        assert_eq!(resume("{}"), "{}");
+    }
+
+    #[test]
+    fn un_message_bavard_est_coupe() {
+        let long = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(500));
+        let r = resume(&long);
+        assert!(r.len() <= 163, "trop long : {}", r.len());
+        assert!(r.ends_with("..."));
+    }
+
+    #[test]
+    fn les_retours_a_la_ligne_sont_aplatis() {
+        // Le message finit dans une popover d'une seule ligne. La chaine brute
+        // porte bien `\n` en deux caracteres : un vrai saut de ligne au milieu
+        // d'une chaine JSON serait invalide, et ne testerait donc pas ce cas.
+        assert_eq!(resume(r#"{"error":{"message":"a\nb"}}"#), "a b");
+    }
 }

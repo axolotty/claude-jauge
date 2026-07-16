@@ -41,8 +41,8 @@ pub fn now() -> u64 {
 pub enum Error {
     /// Le jeton OAuth de Claude Code est introuvable ou illisible.
     Credentials(String),
-    /// Le jeton a expire : c'est a Claude Code de le renouveler, pas a nous.
-    TokenExpired,
+    /// L'API a refuse le jeton (401). Porte ce qu'elle en a dit.
+    Unauthorized(String),
     /// L'appel a l'API n'a pas abouti.
     Probe(String),
     /// La machine qui detient le releve n'a pas repondu.
@@ -59,9 +59,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Credentials(detail) => write!(f, "identifiants Claude Code : {detail}"),
-            Error::TokenExpired => write!(
+            Error::Unauthorized(detail) => write!(
                 f,
-                "le jeton OAuth a expire. Lance Claude Code une fois : il le renouvellera."
+                "jeton refuse par l'API ({detail}). S'il vient de Claude Code, lance-le \
+                 une fois pour qu'il le renouvelle. S'il vient d'une autre machine, \
+                 c'est la-bas qu'il faut le rafraichir."
             ),
             Error::Probe(detail) => write!(f, "la sonde a echoue : {detail}"),
             Error::Remote(detail) => write!(f, "machine distante : {detail}"),
