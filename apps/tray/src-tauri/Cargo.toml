@@ -16,7 +16,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 claude-jauge-core = { path = "../../../crates/core" }
-tauri = { version = "2", features = ["tray-icon"] }
+# `macos-private-api` va de pair avec `app.macOSPrivateApi` dans tauri.conf.json :
+# sans elle, la transparence de la popover est ignoree sur macOS. Elle interdit en
+# revanche une publication sur le Mac App Store.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

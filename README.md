@@ -265,6 +265,15 @@ dans l'app, pour rester testable sans serveur graphique.
   Sous GNOME/Wayland, le tray reclame en plus une extension AppIndicator.
 * **Windows** : WebView2 (deja present sur Windows 11).
 
+La popover est une fenetre transparente, ce qui sur macOS impose
+`app.macOSPrivateApi: true` dans `tauri.conf.json`. Sans ce reglage, Tauri
+ignore la transparence et la fenetre s'affiche avec des coins carres opaques
+autour du dessin. La contrepartie tient en une ligne : une application qui
+utilise ces API ne peut pas etre publiee sur le Mac App Store. Ca ne gene pas
+une distribution directe ou par Homebrew, qui est le mode de vie normal d'un
+widget de barre de menus. Pour s'en passer, il faudrait renoncer aux coins
+arrondis et au flou.
+
 Les icones de l'application se generent une fois avec `npm run tauri icon`.
 
 ## Les trois etats d'une fenetre
