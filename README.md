@@ -316,13 +316,26 @@ OneDev n'ayant que du Linux, il ne peut pas produire l'app.
 | **OneDev** | tag `v*` | binaire CLI Linux, en artefact de build |
 | **GitHub Actions** ([`release.yml`](.github/workflows/release.yml)) | tag `v*` | `.dmg` (ARM + Intel), `.msi`, AppImage et `.deb`, plus le CLI des trois OS |
 
-Publier une version :
+Publier une version. **Le numero vit a quatre endroits**, et c'est
+`tauri.conf.json` qui nomme les paquets : tagger sans les mettre a jour tous
+produirait un `claude-jauge_0.1.0_x64.dmg` sous un tag `v0.1.1`.
 
 ```sh
+# 1. Le numero, aux quatre endroits
+#      Cargo.toml, apps/tray/src-tauri/Cargo.toml,
+#      apps/tray/src-tauri/tauri.conf.json, apps/tray/package.json
+# 2. Les deux Cargo.lock (la racine, et l'app Tauri qui est hors workspace)
+cargo update -w
+(cd apps/tray/src-tauri && cargo update -p claude-jauge-tray -p claude-jauge-core)
+
+git commit -am "0.2.0"
 git tag -a v0.2.0 -m "claude-jauge 0.2.0"
+git push origin main && git push github main
 git push origin v0.2.0    # OneDev : tests + CLI Linux
 git push github v0.2.0    # GitHub : les paquets des trois OS
 ```
+
+**Un tag pousse ne se deplace jamais.** S'il faut corriger, on incremente.
 
 La release GitHub est creee **en brouillon** : rien n'est publie sans relecture.
 
