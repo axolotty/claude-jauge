@@ -21,6 +21,8 @@ jobs:
     name: cargo test
     runInContainer: true
     image: rust:1-slim-trixie
+    # Obligatoire ici, et root convient : le conteneur est jetable.
+    runAs: root
     interpreter: !PosixInterpreter
       # Obligatoire : OneDev refuse un interpreteur sans shell declare.
       shell: bash
@@ -50,6 +52,8 @@ jobs:
     name: tester puis compiler
     runInContainer: true
     image: rust:1-slim-trixie
+    # Obligatoire ici, et root convient : le conteneur est jetable.
+    runAs: root
     interpreter: !PosixInterpreter
       # Obligatoire : OneDev refuse un interpreteur sans shell declare.
       shell: bash
