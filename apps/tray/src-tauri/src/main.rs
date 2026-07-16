@@ -38,6 +38,8 @@ struct Snapshot {
     windows: Vec<WindowView>,
     plan: Option<String>,
     origin: String,
+    /// "statusline" ou "probe" : d'ou viennent les chiffres affiches.
+    source: Option<String>,
     policy: String,
     policy_hint: String,
     note: Option<String>,
@@ -84,10 +86,19 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
     let reading = meter.read(force);
     let now = claude_jauge_core::now();
 
+    // Une fenetre dont on ne sait rien n'a rien a montrer : la statusline ne
+    // donne pas l'overage, et une jauge vide a cote de deux jauges pleines
+    // ressemble a un bug.
     let windows = reading
         .quota
         .as_ref()
-        .map(|q| q.windows().iter().map(|w| view(w, now)).collect())
+        .map(|q| {
+            q.windows()
+                .iter()
+                .filter(|w| w.utilization.is_some() || w.reset_at.is_some())
+                .map(|w| view(w, now))
+                .collect()
+        })
         .unwrap_or_default();
 
     Snapshot {
@@ -99,6 +110,13 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
             Origin::Idle => "idle",
         }
         .to_string(),
+        source: reading.quota.as_ref().map(|q| {
+            match q.source {
+                claude_jauge_core::Source::Statusline => "statusline",
+                claude_jauge_core::Source::Probe => "probe",
+            }
+            .to_string()
+        }),
         policy: match reading.policy {
             Policy::Fidele => "fidele",
             Policy::Prudent => "prudent",

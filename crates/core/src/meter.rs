@@ -18,7 +18,7 @@
 //! D'ou deux politiques, et un reglage pour choisir. Voir [`Policy`].
 
 use crate::config::{self, Policy};
-use crate::quota::Quota;
+use crate::quota::{Quota, Source};
 use crate::{activity, cache, credentials, paths, probe, Error};
 use std::path::PathBuf;
 
@@ -27,6 +27,21 @@ pub const FIVE_HOURS: u64 = 5 * 3600;
 
 /// Delai entre deux sondes periodiques.
 pub const POLL_INTERVAL: u64 = 120;
+
+/// Au-dela, on considere que la statusline ne nous alimente plus.
+///
+/// Elle ne s'execute que pendant que Claude Code affiche sa barre. Tant qu'elle
+/// nourrit le cache, sonder serait du gaspillage pur : elle donne les memes
+/// chiffres, gratuitement et officiellement. Une fois Claude Code ferme, le
+/// relais repasse a la politique en vigueur.
+pub const STATUSLINE_FRESH: u64 = 300;
+
+/// Entre deux ecritures de la statusline, en dessous desquelles on ne reecrit
+/// pas un cache identique.
+///
+/// Claude Code rend sa barre plusieurs fois par seconde : sans ce garde-fou, on
+/// declencherait autant de `fsync`.
+pub const STATUSLINE_WRITE_INTERVAL: u64 = 5;
 
 /// Delai minimal entre deux sondes, toutes politiques confondues.
 ///
@@ -69,6 +84,7 @@ pub fn should_probe(
     policy: Policy,
     force: bool,
     last_probe: Option<u64>,
+    last_source: Option<Source>,
     last_activity: Option<u64>,
     window_closes_at: Option<u64>,
     now: u64,
@@ -76,6 +92,15 @@ pub fn should_probe(
     // Un geste explicite l'emporte sur tout le reste.
     if force {
         return true;
+    }
+
+    // Claude Code nous nourrit gratuitement par sa statusline : sonder donnerait
+    // les memes chiffres en depensant une requete. Ceci passe avant les deux
+    // politiques, qui ne regissent que le repli.
+    if let (Some(Source::Statusline), Some(at)) = (last_source, last_probe) {
+        if now.saturating_sub(at) < STATUSLINE_FRESH {
+            return false;
+        }
     }
 
     // Plancher anti-rafale, commun aux deux politiques.
@@ -163,6 +188,28 @@ impl Meter {
         config::store(&self.config_file, &config)
     }
 
+    /// Enregistre un releve venu de la statusline.
+    ///
+    /// Appele par `claude-jauge statusline`, donc potentiellement plusieurs fois
+    /// par seconde : on evite de reecrire un cache identique et tout frais,
+    /// sinon chaque rendu de la barre declencherait un `fsync`.
+    pub fn record_statusline(&self, quota: &Quota) -> std::io::Result<()> {
+        if let Some(precedent) = cache::load(&self.cache_file) {
+            let frais = quota
+                .probed_at
+                .saturating_sub(precedent.probed_at)
+                < STATUSLINE_WRITE_INTERVAL;
+            let inchange = precedent.source == Source::Statusline
+                && precedent.five_hour.utilization == quota.five_hour.utilization
+                && precedent.five_hour.reset_at == quota.five_hour.reset_at
+                && precedent.seven_day.utilization == quota.seven_day.utilization;
+            if frais && inchange {
+                return Ok(());
+            }
+        }
+        cache::store(&self.cache_file, quota)
+    }
+
     /// Rend l'etat courant des quotas.
     ///
     /// `force` envoie une sonde quoi qu'il arrive : a reserver a une action
@@ -176,6 +223,7 @@ impl Meter {
         let cached = cache::load(&self.cache_file);
         let last_activity = activity::last_activity(&self.projects_dir);
         let last_probe = cached.as_ref().map(|q| q.probed_at);
+        let last_source = cached.as_ref().map(|q| q.source);
         let window_closes_at = cached.as_ref().and_then(|q| q.five_hour.reset_at);
 
         // Le type d'abonnement se lit en local : son absence n'est pas une
@@ -186,7 +234,15 @@ impl Meter {
             .ok()
             .and_then(|c| c.subscription_type.clone());
 
-        if should_probe(policy, force, last_probe, last_activity, window_closes_at, now) {
+        if should_probe(
+            policy,
+            force,
+            last_probe,
+            last_source,
+            last_activity,
+            window_closes_at,
+            now,
+        ) {
             match creds
                 .as_ref()
                 .map_err(|err| err.to_string())
@@ -239,7 +295,9 @@ impl Meter {
                 note: Some(
                     "aucun releve : en sonde prudente, Claude Code doit avoir servi \
                      dans les 5 dernieres heures pour qu'une sonde soit gratuite. \
-                     Rafraichis a la main, ou passe en sonde fidele."
+                     Configure `claude-jauge statusline` dans Claude Code pour etre \
+                     alimente gratuitement, rafraichis a la main, ou passe en sonde \
+                     fidele."
                         .to_string(),
                 ),
             },
@@ -253,7 +311,7 @@ mod tests {
 
     const MAINTENANT: u64 = 1_784_225_000;
 
-    /// Raccourci : sonde prudente.
+    /// Raccourci : sonde prudente, cache issu d'une sonde.
     fn prudent(
         last_probe: Option<u64>,
         last_activity: Option<u64>,
@@ -263,30 +321,78 @@ mod tests {
             Policy::Prudent,
             false,
             last_probe,
+            last_probe.map(|_| Source::Probe),
             last_activity,
             window_closes_at,
             MAINTENANT,
         )
     }
 
-    /// Raccourci : sonde fidele.
+    /// Raccourci : sonde fidele, cache issu d'une sonde.
     fn fidele(last_probe: Option<u64>) -> bool {
-        should_probe(Policy::Fidele, false, last_probe, None, None, MAINTENANT)
+        should_probe(
+            Policy::Fidele,
+            false,
+            last_probe,
+            last_probe.map(|_| Source::Probe),
+            None,
+            None,
+            MAINTENANT,
+        )
+    }
+
+    /// Raccourci : cache alimente par la statusline, a l'age donne.
+    fn nourri_par_statusline(policy: Policy, age: u64) -> bool {
+        should_probe(
+            policy,
+            false,
+            Some(MAINTENANT - age),
+            Some(Source::Statusline),
+            // Activite et fenetre ouvertes : tout pousserait a sonder, sauf que
+            // la statusline rend la sonde inutile.
+            Some(MAINTENANT),
+            Some(MAINTENANT + 3600),
+            MAINTENANT,
+        )
     }
 
     #[test]
     fn force_sonde_toujours_quelle_que_soit_la_politique() {
         for politique in [Policy::Fidele, Policy::Prudent] {
-            assert!(should_probe(politique, true, None, None, None, MAINTENANT));
+            assert!(should_probe(politique, true, None, None, None, None, MAINTENANT));
             assert!(should_probe(
                 politique,
                 true,
                 Some(MAINTENANT),
+                Some(Source::Statusline),
                 Some(MAINTENANT),
                 None,
                 MAINTENANT
             ));
         }
+    }
+
+    // --- La statusline prime sur les deux politiques ----------------------
+
+    #[test]
+    fn une_statusline_fraiche_dispense_de_sonder() {
+        // C'est tout l'interet de la voie officielle : Claude Code donne les
+        // memes chiffres gratuitement, donc depenser une requete serait absurde.
+        // Vrai meme en sonde fidele, qui sonderait sans cela.
+        assert!(!nourri_par_statusline(Policy::Fidele, 0));
+        assert!(!nourri_par_statusline(Policy::Fidele, POLL_INTERVAL * 2));
+        assert!(!nourri_par_statusline(Policy::Prudent, POLL_INTERVAL * 2));
+        assert!(!nourri_par_statusline(Policy::Fidele, STATUSLINE_FRESH - 1));
+    }
+
+    #[test]
+    fn une_statusline_muette_rend_la_main_a_la_politique() {
+        // Claude Code ferme : plus personne ne nourrit le cache, la politique
+        // reprend ses droits.
+        assert!(nourri_par_statusline(Policy::Fidele, STATUSLINE_FRESH));
+        assert!(nourri_par_statusline(Policy::Fidele, STATUSLINE_FRESH + 1));
+        // La prudente, elle, ne sonde que parce que la fenetre est ouverte.
+        assert!(nourri_par_statusline(Policy::Prudent, STATUSLINE_FRESH + 1));
     }
 
     // --- Sonde fidele ----------------------------------------------------
@@ -315,6 +421,7 @@ mod tests {
             Policy::Fidele,
             false,
             Some(MAINTENANT - POLL_INTERVAL),
+            Some(Source::Probe),
             None,
             fenetre_fermee,
             MAINTENANT
@@ -391,5 +498,15 @@ mod tests {
         let futur = MAINTENANT + 10_000;
         assert!(!fidele(Some(futur)));
         assert!(!prudent(Some(futur), Some(MAINTENANT), None));
+        // Meme du futur, une statusline reste une statusline.
+        assert!(!should_probe(
+            Policy::Fidele,
+            false,
+            Some(futur),
+            Some(Source::Statusline),
+            None,
+            None,
+            MAINTENANT
+        ));
     }
 }

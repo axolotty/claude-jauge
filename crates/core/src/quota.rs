@@ -131,6 +131,21 @@ impl Window {
     }
 }
 
+/// Comment un releve a ete obtenu.
+///
+/// La distinction porte a consequence : un releve venu de la statusline est
+/// gratuit et officiel, donc tant que Claude Code nous en sert, il n'y a aucune
+/// raison de sonder l'API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// Lu dans les en-tetes d'une reponse, apres une sonde.
+    #[default]
+    Probe,
+    /// Passe par Claude Code a sa statusline. Aucun appel reseau, aucun jeton.
+    Statusline,
+}
+
 /// Un releve complet, tel que renvoye par une reponse de l'API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quota {
@@ -147,6 +162,12 @@ pub struct Quota {
     pub representative_claim: Option<String>,
     /// Date du releve, en secondes depuis l'epoch.
     pub probed_at: u64,
+    /// D'ou vient ce releve.
+    ///
+    /// `serde(default)` pour qu'un cache ecrit par une version anterieure, qui
+    /// ne connaissait que la sonde, reste lisible.
+    #[serde(default)]
+    pub source: Source,
 }
 
 impl Quota {
@@ -191,6 +212,7 @@ impl Quota {
                 .and_then(|raw| parse_utilization(&raw)),
             representative_claim: get(&format!("{HEADER_PREFIX}-representative-claim")),
             probed_at,
+            source: Source::Probe,
         };
 
         let vide = quota.windows().iter().all(|w| w.utilization.is_none() && w.reset_at.is_none())

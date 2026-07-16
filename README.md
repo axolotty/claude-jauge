@@ -12,9 +12,49 @@ le sens du mot `unified` dans le nom des en-tetes.
 
 ![les etats de la jauge](docs/jauge.png)
 
-## D'ou viennent les chiffres
+## Deux facons d'obtenir les chiffres
 
-L'API renvoie l'etat des quotas dans les en-tetes de **chacune** de ses reponses :
+### 1. La statusline, la voie normale
+
+Claude Code passe l'etat des quotas a sa statusline, a chaque rendu de sa barre.
+Une ligne dans `~/.claude/settings.json` suffit :
+
+```json
+{ "statusLine": { "type": "command", "command": "claude-jauge statusline" } }
+```
+
+Il recoit alors, sur son entree standard :
+
+```json
+{
+  "model": { "display_name": "Opus" },
+  "context_window": { "used_percentage": 8 },
+  "rate_limits": {
+    "five_hour": { "used_percentage": 23.5, "resets_at": 1738425600 },
+    "seven_day": { "used_percentage": 41.2, "resets_at": 1738857600 }
+  }
+}
+```
+
+`claude-jauge statusline` affiche ces chiffres dans la barre, et en depose une
+copie dans le cache que lit le widget. Tant que le cache est ainsi alimente,
+**aucune sonde n'est envoyee** : ni appel API, ni jeton, ni en-tete non publie.
+La documentation precise d'ailleurs que la statusline ne consomme aucun token.
+
+C'est le chemin a privilegier, et de loin. Ses limites : `rate_limits` n'existe
+que pour les abonnes Pro et Max, et seulement apres la premiere reponse de l'API
+dans la session ; il n'y a ni overage ni fallback ; et elle ne s'execute que
+pendant que Claude Code tourne. Entre deux rendus, le compte a rebours avance en
+local, et les compteurs ne bougent de toute facon que si tu consommes.
+
+> Attention a l'echelle si tu lis le code : ici `used_percentage` vaut deja 0 a
+> 100 (`23.5` pour 23,5 %), alors que les en-tetes HTTP du repli expriment une
+> fraction (`0.73` pour 73 %).
+
+### 2. La sonde, en repli
+
+Pour les machines ou Claude Code ne tourne pas. L'API renvoie l'etat des quotas
+dans les en-tetes de **chacune** de ses reponses :
 
 ```
 anthropic-ratelimit-unified-5h-utilization: 0.73     <- 73 % de la fenetre 5h
@@ -33,7 +73,10 @@ machine. Une cle API de `console.anthropic.com` ne conviendrait pas : elle ouvre
 sur le pay-as-you-go, dont les quotas sont d'une autre nature (requetes/min,
 tokens/min) et qui ne renvoie aucun en-tete `unified-*`.
 
-## Ou trouver le jeton
+## Ou trouver le jeton (repli uniquement)
+
+Rien de tout ceci n'est necessaire avec la statusline : elle n'utilise aucun
+jeton. Ce qui suit ne vaut que pour la sonde de repli.
 
 Par defaut, la ou Claude Code le range : trousseau macOS
 (`Claude Code-credentials`), ou `~/.claude/.credentials.json`.
@@ -67,10 +110,13 @@ trousseau restee sans reponse, ou un `ssh` vers une machine eteinte, figerait le
 widget sans un mot.
 
 > **Ces en-tetes ne sont pas documentes publiquement.** Ils peuvent changer sans
-> preavis. Tout est donc optionnel dans le code : un champ absent s'affiche `?`,
-> il ne fait rien planter.
+> preavis, et c'est une raison de plus de preferer la statusline. Tout est donc
+> optionnel dans le code : un champ absent est tu, il ne fait rien planter.
 
 ## Quand sonder : un arbitrage sans bonne reponse
+
+*Cette section ne concerne que le repli. Avec la statusline configuree, rien de
+tout ceci ne se declenche.*
 
 L'idee vient de [Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter), le
 petit ecran ESP32 de Hermann Bjorgvin. Son daemon interroge l'API toutes les
@@ -164,6 +210,7 @@ cargo build --release -p claude-jauge-cli
 | `-w, --watch [SECS]` | Rafraichit en continu (5 s par defaut). |
 | `-f, --force` | Sonde meme si rien n'a bouge. A froid, **ouvre une fenetre de 5h**. |
 | `-p, --policy NOM` | `fidele` ou `prudent`, pour cet appel seulement. |
+| `statusline` | Sous-commande : se fait alimenter par Claude Code. |
 | `--no-color` | Aucune couleur (`NO_COLOR` est respecte aussi). |
 
 ## Le widget
@@ -231,7 +278,7 @@ l'un ni l'autre ne contient de jeton.
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-67 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
+77 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
 politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence

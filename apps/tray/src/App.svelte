@@ -104,7 +104,16 @@
     {#if releve?.origin === "probed"}
       <span class="point vert-point" title="releve frais"></span>
     {/if}
-    {#if releve?.policy}
+    <!-- Quand Claude Code nous alimente, la politique de sonde ne joue aucun
+         role : l'afficher laisserait croire qu'une requete est partie. -->
+    {#if releve?.source === "statusline"}
+      <span
+        class="politique"
+        title="Chiffres fournis par Claude Code via sa statusline. Aucun appel API, aucun jeton."
+      >
+        via statusline
+      </span>
+    {:else if releve?.policy}
       <span class="politique" title={releve.policy_hint}>
         sonde {releve.policy}
       </span>

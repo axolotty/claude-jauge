@@ -18,11 +18,12 @@ pub mod meter;
 pub mod paths;
 pub mod probe;
 pub mod quota;
+pub mod statusline;
 
 pub use config::{Config, Policy};
 pub use credentials::Credentials;
 pub use meter::{Meter, Origin, Reading};
-pub use quota::{human_duration, Quota, Window, WindowKind};
+pub use quota::{human_duration, Quota, Source, Window, WindowKind};
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};

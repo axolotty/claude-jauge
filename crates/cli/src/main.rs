@@ -5,8 +5,11 @@
 
 use chrono::{Datelike, Local, TimeZone};
 use claude_jauge_core::quota::Health;
-use claude_jauge_core::{human_duration, meter::Origin, Meter, Policy, Quota, Reading, Window};
-use std::io::{self, IsTerminal, Write};
+use claude_jauge_core::statusline::Input;
+use claude_jauge_core::{
+    human_duration, meter::Origin, Meter, Policy, Quota, Reading, Source, Window, WindowKind,
+};
+use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
 use std::thread::sleep;
 use std::time::Duration;
@@ -16,6 +19,17 @@ claude-jauge : ou en est la consommation Claude.
 
 USAGE
     claude-jauge [OPTIONS]
+    claude-jauge statusline      Se fait alimenter par Claude Code (voir plus bas).
+
+STATUSLINE
+    La voie a privilegier : documentee, gratuite, sans jeton ni appel API.
+    Ajoute ceci a ~/.claude/settings.json :
+
+        { \"statusLine\": { \"type\": \"command\", \"command\": \"claude-jauge statusline\" } }
+
+    Claude Code lui passe alors les quotas a chaque rendu de sa barre. La
+    commande les affiche, et en garde une copie que le widget relit. Tant
+    qu'elle alimente le cache, aucune sonde n'est envoyee.
 
 OPTIONS
     -j, --json           Sortie JSON, pour scripter ou alimenter une barre de statut.
@@ -29,12 +43,17 @@ OPTIONS
     -V, --version        Affiche la version.
 
 FONCTIONNEMENT
-    Les quotas sont lus dans les en-tetes que l'API renvoie sur chacune de ses
-    reponses. Ils valent pour TOUT Claude : claude.ai, l'app de bureau et Claude
+    Les chiffres valent pour TOUT Claude : claude.ai, l'app de bureau et Claude
     Code partagent le meme pool.
 
-    Une sonde est une requete, donc elle ouvre une fenetre de session de 5h s'il
-    n'y en a pas deja une. D'ou deux politiques :
+    Quand la statusline ci-dessus est configuree, elle suffit : tant qu'elle
+    alimente le cache, rien d'autre ne se declenche. Ce qui suit ne concerne que
+    le repli, pour les machines ou Claude Code ne tourne pas.
+
+    Faute de statusline, les quotas sont lus dans les en-tetes que l'API renvoie
+    sur chacune de ses reponses. Une sonde est alors une requete, donc elle ouvre
+    une fenetre de session de 5h s'il n'y en a pas deja une. D'ou deux
+    politiques :
 
       fidele    Sonde toutes les 2 min. Chiffres toujours justes, y compris
                 quand la consommation vient de claude.ai. Peut ouvrir une
@@ -57,11 +76,22 @@ struct Options {
 
 enum Action {
     Run(Options),
+    /// Lit le document de Claude Code sur stdin et rend une ligne de statut.
+    Statusline,
     Aide,
     Version,
 }
 
 fn parse(args: &[String]) -> Result<Action, String> {
+    // Seule sous-commande, et elle doit venir en premier : Claude Code appelle
+    // la commande telle quelle, sans rien y ajouter.
+    if args.first().map(String::as_str) == Some("statusline") {
+        if args.len() > 1 {
+            return Err(format!("statusline ne prend pas d'option : {}", args[1]));
+        }
+        return Ok(Action::Statusline);
+    }
+
     let mut opts = Options {
         json: false,
         force: false,
@@ -131,6 +161,7 @@ fn main() -> ExitCode {
             println!("claude-jauge {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
+        Action::Statusline => return statusline(),
         Action::Run(opts) => opts,
     };
 
@@ -168,6 +199,83 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+// --- Mode statusline -----------------------------------------------------
+
+/// Lit le document de Claude Code sur stdin, en garde une copie pour le widget,
+/// et rend une ligne de statut.
+///
+/// Cette fonction s'execute dans la barre de quelqu'un qui travaille : elle ne
+/// doit jamais crier. Toute anomalie rend une sortie vide et un succes, plutot
+/// que de barbouiller son interface d'un message d'erreur a chaque rendu.
+fn statusline() -> ExitCode {
+    let mut document = String::new();
+    if io::stdin().read_to_string(&mut document).is_err() {
+        return ExitCode::SUCCESS;
+    }
+
+    let input = match claude_jauge_core::statusline::parse(&document) {
+        Ok(input) => input,
+        Err(_) => return ExitCode::SUCCESS,
+    };
+
+    let now = claude_jauge_core::now();
+    let quota = input.quota(now);
+
+    // C'est ici que la statusline nourrit le widget. Un cache en echec ne doit
+    // pas priver l'utilisateur de sa barre pour autant.
+    if let (Some(releve), Ok(meter)) = (quota.as_ref(), Meter::new()) {
+        let _ = meter.record_statusline(releve);
+    }
+
+    println!("{}", ligne_statut(&input, quota.as_ref(), now));
+    ExitCode::SUCCESS
+}
+
+fn ligne_statut(input: &Input, quota: Option<&Quota>, now: u64) -> String {
+    // Claude Code capture cette sortie : ce n'est jamais un terminal, donc
+    // `is_terminal()` dirait non a tort. Les couleurs sont rendues par Claude
+    // Code lui-meme, on les emet donc toujours, sauf NO_COLOR.
+    let couleur = std::env::var_os("NO_COLOR").is_none();
+    let c = |code: &'static str| if couleur { code } else { "" };
+
+    let mut bouts: Vec<String> = Vec::new();
+
+    if let Some(nom) = input.model_name() {
+        bouts.push(format!("{}{}{}", c(GRAS), nom, c(RESET)));
+    }
+
+    if let Some(ctx) = input.context_used() {
+        bouts.push(format!("{}ctx {:.0}%{}", c(GRIS), ctx, c(RESET)));
+    }
+
+    if let Some(releve) = quota {
+        for fenetre in [&releve.five_hour, &releve.seven_day] {
+            let Some(taux) = fenetre.utilization else {
+                continue;
+            };
+            let etiquette = match fenetre.kind {
+                WindowKind::FiveHour => "5h",
+                WindowKind::SevenDay => "7j",
+                WindowKind::Overage => "over",
+            };
+            let reste = match fenetre.seconds_left(now) {
+                Some(secondes) => format!(" {}{}{}", c(GRIS), human_duration(secondes), c(RESET)),
+                None => String::new(),
+            };
+            bouts.push(format!(
+                "{etiquette} {}{}{} {}{taux:.0}%{}{reste}",
+                c(teinte(fenetre.utilization)),
+                barre(fenetre.utilization, 5),
+                c(RESET),
+                c(teinte(fenetre.utilization)),
+                c(RESET),
+            ));
+        }
+    }
+
+    bouts.join(&format!("{} · {}", c(GRIS), c(RESET)))
 }
 
 fn afficher(reading: &Reading, opts: &Options) {
@@ -214,6 +322,10 @@ fn en_json(reading: &Reading) -> String {
             "representative_claim": q.representative_claim,
             "probed_at": q.probed_at,
             "age_seconds": q.age(now),
+            "source": match q.source {
+                Source::Statusline => "statusline",
+                Source::Probe => "probe",
+            },
         })
     });
 
@@ -314,6 +426,12 @@ fn en_texte(reading: &Reading, couleur: bool) -> String {
     };
 
     for w in quota.windows() {
+        // Une fenetre dont on ne sait rien n'apprend rien. La statusline ne donne
+        // pas l'overage : mieux vaut taire la ligne qu'aligner des points
+        // d'interrogation.
+        if w.utilization.is_none() && w.reset_at.is_none() {
+            continue;
+        }
         out.push_str(&ligne(w, now, couleur));
     }
 
@@ -384,7 +502,12 @@ fn pied(reading: &Reading, quota: &Quota, now: u64, couleur: bool) -> String {
         }
     }
 
-    bouts.push(reading.policy.label().to_lowercase());
+    // Quand Claude Code nous alimente, la politique de sonde ne joue aucun role :
+    // l'annoncer laisserait croire qu'une requete est partie.
+    bouts.push(match quota.source {
+        Source::Statusline => "via statusline".to_string(),
+        Source::Probe => reading.policy.label().to_lowercase(),
+    });
 
     let mut out = format!("  {}{}{}\n", c(GRIS), bouts.join(" · "), c(RESET));
     if let Some(note) = &reading.note {

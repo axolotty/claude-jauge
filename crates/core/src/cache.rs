@@ -38,7 +38,7 @@ pub fn store(path: &Path, quota: &Quota) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::{Window, WindowKind};
+    use crate::quota::{Source, Window, WindowKind};
     use std::path::PathBuf;
 
     struct TempDir(PathBuf);
@@ -79,6 +79,7 @@ mod tests {
             fallback_percentage: Some(50.0),
             representative_claim: Some("five_hour".into()),
             probed_at: 1784225000,
+            source: Source::Probe,
         }
     }
 
