@@ -78,7 +78,9 @@ jobs:
     artifacts: '**'
     condition: SUCCESSFUL
   triggers:
-  - !TagCreateTrigger {}
+  - !TagCreateTrigger
+    # Sans ce filtre, n'importe quel tag declencherait une release.
+    tags: v*
   retryCondition: never
   maxRetries: 3
   retryDelay: 30

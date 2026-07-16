@@ -1,0 +1,120 @@
+# Paquets des trois OS, sur tag de version.
+#
+# Ce fichier existe parce qu'un .dmg ne se compile que sur macOS et un .msi que
+# sur Windows : la CI OneDev, elle, ne dispose que de Linux. Le partage est donc
+# net, et decrit dans .onedev-buildspec.yml : la-bas les tests et le binaire CLI
+# a chaque push, ici les paquets a chaque tag.
+#
+#   git tag v0.2.0 && git push --tags
+#
+# La release est creee en brouillon : rien n'est publie avant que tu l'aies
+# relue et validee a la main.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  paquets:
+    permissions:
+      contents: write
+
+    strategy:
+      # Un OS qui echoue ne doit pas priver des paquets des deux autres.
+      fail-fast: false
+      matrix:
+        include:
+          # Les Mac Apple Silicon et Intel prennent deux binaires distincts.
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            cible: aarch64-apple-darwin
+            nom_cli: claude-jauge-macos-arm64
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            cible: x86_64-apple-darwin
+            nom_cli: claude-jauge-macos-x86_64
+          # 22.04 plutot que la derniere : on se lie a la glibc du runner, donc
+          # partir d'une vieille elargit le parc compatible.
+          - platform: ubuntu-22.04
+            args: ""
+            cible: ""
+            nom_cli: claude-jauge-linux-x86_64
+          - platform: windows-latest
+            args: ""
+            cible: ""
+            nom_cli: claude-jauge-windows-x86_64.exe
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cible }}
+
+      # Le cache Rust : sans lui, chaque tag recompile tout Tauri.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/tray/src-tauri
+
+      - name: dependances systeme (Linux seulement)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            build-essential \
+            pkg-config
+
+      - name: dependances du front
+        working-directory: apps/tray
+        run: npm ci
+
+      - name: paquet du widget
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/tray
+          tagName: ${{ github.ref_name }}
+          releaseName: "claude-jauge ${{ github.ref_name }}"
+          releaseBody: "Paquets construits automatiquement. Voir le README pour l'installation."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Le CLI voyage a part : c'est lui qui porte `claude-jauge statusline`,
+      # donc il sert meme a qui ne veut pas du widget.
+      - name: binaire CLI
+        shell: bash
+        run: |
+          set -e
+          if [ -n "${{ matrix.cible }}" ]; then
+            cargo build --release --locked -p claude-jauge-cli --target ${{ matrix.cible }}
+            chemin="target/${{ matrix.cible }}/release/claude-jauge"
+          else
+            cargo build --release --locked -p claude-jauge-cli
+            chemin="target/release/claude-jauge"
+          fi
+          [ -f "$chemin.exe" ] && chemin="$chemin.exe"
+          cp "$chemin" "${{ matrix.nom_cli }}"
+
+      - name: joindre le CLI a la release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "${{ matrix.nom_cli }}" --clobber
