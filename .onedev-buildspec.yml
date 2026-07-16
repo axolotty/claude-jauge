@@ -22,6 +22,8 @@ jobs:
     runInContainer: true
     image: rust:1-slim-trixie
     interpreter: !PosixInterpreter
+      # Obligatoire : OneDev refuse un interpreteur sans shell declare.
+      shell: bash
       commands: |
         set -e
         # --locked : un Cargo.lock qui a bouge doit faire echouer la CI, pas
@@ -49,6 +51,8 @@ jobs:
     runInContainer: true
     image: rust:1-slim-trixie
     interpreter: !PosixInterpreter
+      # Obligatoire : OneDev refuse un interpreteur sans shell declare.
+      shell: bash
       commands: |
         set -e
         # On reteste avant de publier : un artefact de release ne sort pas d'un
