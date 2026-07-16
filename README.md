@@ -310,7 +310,7 @@ l'un ni l'autre ne contient de jeton.
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-82 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
+84 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
 politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence

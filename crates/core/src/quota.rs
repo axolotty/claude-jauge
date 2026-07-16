@@ -248,23 +248,30 @@ impl Quota {
     }
 }
 
-/// Convertit une utilisation d'en-tete en pourcentage.
+/// Assainit un pourcentage : arrondi au centieme, puis borne.
 ///
-/// L'API l'exprime en fraction : `0.73` vaut 73 %, et `fallback-percentage: 0.5`
-/// designe bien un seuil a 50 %. On multiplie donc par 100, puis on borne, pour
-/// qu'une valeur inattendue ne fasse pas deborder une jauge.
-///
-/// L'arrondi au centieme n'est pas cosmetique : `0.14 * 100.0` vaut
-/// `14.000000000000002` en virgule flottante, et ce nombre finirait tel quel
-/// dans la sortie JSON. Le centieme de pourcent reste largement plus fin que
+/// L'arrondi n'est pas cosmetique. `0.14 * 100.0` vaut `14.000000000000002` en
+/// virgule flottante, et Claude Code lui-meme sait annoncer `57.99999999999999`
+/// dans sa statusline. Sans ca, ces nombres finissent tels quels dans la sortie
+/// JSON et dans le cache. Le centieme de pourcent reste largement plus fin que
 /// tout ce qu'on affiche.
-fn parse_utilization(raw: &str) -> Option<f64> {
-    let value: f64 = raw.trim().parse().ok()?;
+///
+/// Le bornage protege les jauges d'une valeur inattendue.
+pub(crate) fn tidy_percent(value: f64) -> Option<f64> {
     if !value.is_finite() {
         return None;
     }
-    let percent = (value * 10_000.0).round() / 100.0;
-    Some(percent.clamp(0.0, 100.0))
+    Some(((value * 100.0).round() / 100.0).clamp(0.0, 100.0))
+}
+
+/// Convertit une utilisation d'en-tete en pourcentage.
+///
+/// L'API l'exprime en fraction : `0.73` vaut 73 %, et `fallback-percentage: 0.5`
+/// designe bien un seuil a 50 %. Attention, la statusline fait l'inverse et
+/// donne deja des pourcentages : voir [`crate::statusline`].
+fn parse_utilization(raw: &str) -> Option<f64> {
+    let fraction: f64 = raw.trim().parse().ok()?;
+    tidy_percent(fraction * 100.0)
 }
 
 /// Ecrit une duree en francais compact : `3j02h`, `1h49`, `12m`, `<1m`.

@@ -119,11 +119,9 @@ fn fenetre(kind: WindowKind, brut: Option<&RateWindow>) -> Window {
         None => Window::unknown(kind),
         Some(w) => Window {
             kind,
-            // Deja un pourcentage : on borne, sans convertir.
-            utilization: w
-                .used_percentage
-                .filter(|v| v.is_finite())
-                .map(|v| v.clamp(0.0, 100.0)),
+            // Deja un pourcentage : on assainit, sans convertir. Claude Code sait
+            // annoncer `57.99999999999999`, vu en vrai.
+            utilization: w.used_percentage.and_then(crate::quota::tidy_percent),
             reset_at: w.resets_at,
             status: None,
         },
@@ -219,5 +217,20 @@ mod tests {
     fn une_valeur_aberrante_est_bornee() {
         let fou = r#"{"rate_limits": {"five_hour": {"used_percentage": 150}}}"#;
         assert_eq!(parse(fou).unwrap().quota(0).unwrap().five_hour.utilization, Some(100.0));
+    }
+
+    #[test]
+    fn le_bruit_flottant_de_claude_code_est_assaini() {
+        // Valeur relevee telle quelle dans un vrai document de statusline. Sans
+        // arrondi, ce nombre atterrit tel quel dans le cache et dans --json.
+        let bruit = r#"{"rate_limits": {"five_hour": {"used_percentage": 57.99999999999999}}}"#;
+        assert_eq!(parse(bruit).unwrap().quota(0).unwrap().five_hour.utilization, Some(58.0));
+    }
+
+    #[test]
+    fn les_decimales_utiles_survivent_a_larrondi() {
+        // On arrondit au centieme, pas a l'unite : 23,5 % reste 23,5 %.
+        let fin = r#"{"rate_limits": {"five_hour": {"used_percentage": 23.5}}}"#;
+        assert_eq!(parse(fin).unwrap().quota(0).unwrap().five_hour.utilization, Some(23.5));
     }
 }
