@@ -234,6 +234,19 @@ fn hide(app: AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        // Doit venir en PREMIER : le plugin coupe court avant que le reste ne
+        // s'initialise, sinon une seconde instance a le temps de poser sa propre
+        // icone dans la barre. C'est ce qui produisait les icones fantomes a
+        // chaque `tauri dev` relance.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _dossier| {
+            // On ne rend pas la main en silence : l'utilisateur a relance
+            // l'application, il attend quelque chose. On lui montre celle qui
+            // tourne deja.
+            if let Some(fenetre) = app.get_webview_window("main") {
+                let _ = fenetre.show();
+                let _ = fenetre.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_positioner::init())
         .invoke_handler(tauri::generate_handler![current, refresh, hide])
         .setup(|app| {
@@ -322,9 +335,20 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("construction de l'application")
         .run(|_app, event| {
-            // Sans ca, macOS quitterait l'app a la fermeture de la derniere fenetre.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // `code` distingue les deux raisons de partir, et tout est la :
+                //
+                //   None       la derniere fenetre s'est fermee. Un widget de
+                //              barre de menus n'a aucune raison de mourir pour
+                //              ca : on retient l'application.
+                //   Some(_)    quelqu'un a appele `app.exit(n)`, donc « Quitter ».
+                //              C'est une volonte explicite, on la respecte.
+                //
+                // Retenir les deux rendait l'application inquittable : le menu
+                // appelait bien exit(0), et on l'annulait aussitot.
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }

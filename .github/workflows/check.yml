@@ -1,0 +1,63 @@
+# Verifie que l'app Tauri compile, a chaque push.
+#
+# La CI OneDev ne peut pas le faire : l'app se lie a webkit2gtk, que le serveur
+# n'a pas. Jusqu'ici, la seule chose qui compilait le widget etait le workflow de
+# release, donc on ne decouvrait une erreur qu'en posant un tag. C'est ainsi que
+# v0.1.2 est morte en 6 secondes sur un flag inexistant.
+#
+# A noter, pour ne pas se raconter d'histoires : ceci attrape ce qui ne compile
+# pas, rien de plus. Les deux bugs de la 0.1.4 (application inquittable, icones
+# en double) compilaient parfaitement. Seul quelqu'un qui LANCE l'application les
+# voit.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Un push qui en suit un autre annule le precedent : seul le dernier etat compte.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  widget:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/tray/src-tauri
+
+      - name: dependances systeme
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            build-essential \
+            pkg-config
+
+      - name: front
+        working-directory: apps/tray
+        run: |
+          npm ci
+          # `cargo check` lit tauri.conf.json, qui pointe sur ../dist : sans le
+          # build du front, generate_context! echoue sur un dossier absent.
+          npm run build
+
+      - name: cargo check du widget
+        working-directory: apps/tray/src-tauri
+        run: cargo check --locked --all-targets
