@@ -38,14 +38,27 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+
+          # `gh api` n'a pas de --retry (seulement --cache et --silent), donc on
+          # reessaye a la main. Une API qui hoquete trois secondes ne doit pas
+          # couter une release : c'est exactement ce qui est arrive le 16 juillet.
+          reessaye() {
+            local essai
+            for essai in 1 2 3 4 5; do
+              if "$@"; then return 0; fi
+              echo "  echec (essai ${essai}/5), nouvelle tentative dans 5 s" >&2
+              sleep 5
+            done
+            return 1
+          }
+
           # Idempotent : relancer le workflow ne doit pas fabriquer un doublon.
           # On liste au lieu d'interroger /releases/tags/{tag}, qui ignore les
-          # brouillons. --retry : une API qui hoquete ne doit pas couter une
-          # release entiere.
-          id=$(gh api --retry 5 "repos/${GITHUB_REPOSITORY}/releases" \
+          # brouillons.
+          id=$(reessaye gh api "repos/${GITHUB_REPOSITORY}/releases" \
                  --jq "[.[] | select(.tag_name == \"${TAG}\" and .draft)] | first | .id")
           if [ -z "$id" ] || [ "$id" = "null" ]; then
-            id=$(gh api --retry 5 --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            id=$(reessaye gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
                    -f tag_name="${TAG}" \
                    -f name="claude-jauge ${TAG}" \
                    -f body="Paquets construits automatiquement. Voir le README pour l'installation." \
