@@ -37,14 +37,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          set -e
+          set -euo pipefail
           # Idempotent : relancer le workflow ne doit pas fabriquer un doublon.
           # On liste au lieu d'interroger /releases/tags/{tag}, qui ignore les
-          # brouillons.
-          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+          # brouillons. --retry : une API qui hoquete ne doit pas couter une
+          # release entiere.
+          id=$(gh api --retry 5 "repos/${GITHUB_REPOSITORY}/releases" \
                  --jq "[.[] | select(.tag_name == \"${TAG}\" and .draft)] | first | .id")
           if [ -z "$id" ] || [ "$id" = "null" ]; then
-            id=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            id=$(gh api --retry 5 --method POST "repos/${GITHUB_REPOSITORY}/releases" \
                    -f tag_name="${TAG}" \
                    -f name="claude-jauge ${TAG}" \
                    -f body="Paquets construits automatiquement. Voir le README pour l'installation." \
@@ -153,8 +154,28 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ID: ${{ needs.brouillon.outputs.id }}
+          NOM: ${{ matrix.nom_cli }}
         run: |
-          set -e
-          # `gh release upload <tag>` sait viser un brouillon (verifie), et le
-          # tag ne porte plus qu'une seule release grace au job `brouillon`.
-          gh release upload "${{ github.ref_name }}" "${{ matrix.nom_cli }}" --clobber
+          set -euo pipefail
+          # On vise l'id, jamais le tag.
+          #
+          # `gh release upload <tag>` commence par resoudre le tag via
+          # /releases/tags/{tag}. Cet endpoint a deux defauts : il ignore les
+          # brouillons, et c'est lui qui a renvoye 503 pendant l'incident du
+          # 16 juillet, faisant tomber les quatre jobs alors que les paquets
+          # etaient deja deposes. Or l'id nous est donne par le job `brouillon` :
+          # cette recherche etait inutile autant que fragile.
+          #
+          # --retry couvre le reste : une release a moitie publiee parce que
+          # l'API a hoquete trois secondes n'a aucun interet.
+          curl --silent --show-error --fail-with-body \
+               --retry 5 --retry-delay 5 --retry-all-errors \
+               --request POST \
+               --header "Authorization: Bearer ${GH_TOKEN}" \
+               --header "X-GitHub-Api-Version: 2022-11-28" \
+               --header "Content-Type: application/octet-stream" \
+               --data-binary "@${NOM}" \
+               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${ID}/assets?name=${NOM}" \
+               --output /dev/null
+          echo "${NOM} joint au brouillon ${ID}"
