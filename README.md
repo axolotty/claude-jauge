@@ -238,6 +238,19 @@ cargo build --release -p claude-jauge-cli
 
 ## Le widget
 
+Une release fournit sept fichiers, pas un de plus :
+
+| Fichier | Pour qui |
+| --- | --- |
+| `claude-jauge_<v>_universal.dmg` | macOS, Intel **et** Apple Silicon dans le meme paquet |
+| `claude-jauge_<v>_amd64.deb` | Debian, Ubuntu |
+| `claude-jauge_<v>_x64-setup.exe` | Windows, installeur |
+| `claude-jauge_<v>_x64_en-US.msi` | Windows, deploiement en parc |
+| `claude-jauge-macos`, `-linux-x86_64`, `-windows-x86_64.exe` | le CLI, indispensable a `claude-jauge statusline` |
+
+Le CLI voyage a part parce qu'il sert seul : c'est lui qui porte la statusline,
+donc le mode sans jeton ni appel API. Installer le widget ne l'installe pas.
+
 ```sh
 cd apps/tray
 npm install
@@ -314,7 +327,7 @@ OneDev n'ayant que du Linux, il ne peut pas produire l'app.
 | --- | --- | --- |
 | **OneDev** ([`.onedev-buildspec.yml`](.onedev-buildspec.yml)) | chaque push | tests du coeur et du CLI |
 | **OneDev** | tag `v*` | binaire CLI Linux, en artefact de build |
-| **GitHub Actions** ([`release.yml`](.github/workflows/release.yml)) | tag `v*` | `.dmg` (ARM + Intel), `.msi`, AppImage et `.deb`, plus le CLI des trois OS |
+| **GitHub Actions** ([`release.yml`](.github/workflows/release.yml)) | tag `v*` | 4 installeurs (`.dmg` universel, `.deb`, `.exe`, `.msi`) et 3 binaires CLI |
 
 Publier une version. **Le numero vit a quatre endroits**, et c'est
 `tauri.conf.json` qui nomme les paquets : tagger sans les mettre a jour tous

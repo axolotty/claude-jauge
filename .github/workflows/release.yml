@@ -80,25 +80,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Les Mac Apple Silicon et Intel prennent deux binaires distincts.
+          # Un seul job macOS, et un seul .dmg : le binaire universel porte les
+          # deux architectures. Livrer deux .dmg obligerait chaque utilisateur a
+          # savoir si son Mac est Intel ou Apple Silicon, et la moitie se
+          # tromperait.
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-            cible: aarch64-apple-darwin
-            nom_cli: claude-jauge-macos-arm64
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            cible: x86_64-apple-darwin
-            nom_cli: claude-jauge-macos-x86_64
+            args: "--target universal-apple-darwin"
+            cible: "aarch64-apple-darwin,x86_64-apple-darwin"
+            nom_cli: claude-jauge-macos
+            universel: "oui"
           # 22.04 plutot que la derniere : on se lie a la glibc du runner, donc
           # partir d'une vieille elargit le parc compatible.
           - platform: ubuntu-22.04
             args: ""
             cible: ""
             nom_cli: claude-jauge-linux-x86_64
+            universel: "non"
           - platform: windows-latest
             args: ""
             cible: ""
             nom_cli: claude-jauge-windows-x86_64.exe
+            universel: "non"
 
     runs-on: ${{ matrix.platform }}
 
@@ -151,17 +153,27 @@ jobs:
       # donc il sert meme a qui ne veut pas du widget.
       - name: binaire CLI
         shell: bash
+        env:
+          NOM: ${{ matrix.nom_cli }}
         run: |
-          set -e
-          if [ -n "${{ matrix.cible }}" ]; then
-            cargo build --release --locked -p claude-jauge-cli --target ${{ matrix.cible }}
-            chemin="target/${{ matrix.cible }}/release/claude-jauge"
+          set -euo pipefail
+          if [ "${{ matrix.universel }}" = "oui" ]; then
+            # `universal-apple-darwin` n'est pas une cible que cargo sait viser :
+            # c'est deux binaires colles par lipo. Tauri le fait pour son app, on
+            # le refait pour le CLI, sinon les utilisateurs Intel se retrouveraient
+            # avec un .dmg universel et un CLI qui ne demarre pas chez eux.
+            cargo build --release --locked -p claude-jauge-cli --target aarch64-apple-darwin
+            cargo build --release --locked -p claude-jauge-cli --target x86_64-apple-darwin
+            lipo -create -output "${NOM}" \
+              target/aarch64-apple-darwin/release/claude-jauge \
+              target/x86_64-apple-darwin/release/claude-jauge
+            lipo -info "${NOM}"
           else
             cargo build --release --locked -p claude-jauge-cli
             chemin="target/release/claude-jauge"
+            [ -f "${chemin}.exe" ] && chemin="${chemin}.exe"
+            cp "${chemin}" "${NOM}"
           fi
-          [ -f "$chemin.exe" ] && chemin="$chemin.exe"
-          cp "$chemin" "${{ matrix.nom_cli }}"
 
       - name: joindre le CLI au brouillon
         shell: bash
