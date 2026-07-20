@@ -19,6 +19,7 @@ pub mod paths;
 pub mod probe;
 pub mod quota;
 pub mod statusline;
+pub mod update;
 
 pub use config::{Config, Policy};
 pub use credentials::Credentials;

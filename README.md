@@ -263,7 +263,14 @@ npm run tauri build    # paquet distribuable
 * Le titre a cote de l'icone (`96% · 45m`) s'affiche tel quel dans la barre macOS.
   Quand il n'y a rien a montrer il vaut `!` (une raison attend dans la popover)
   ou `...`, jamais un `?` enigmatique.
-* `Echap` referme, `Cmd/Ctrl+R` sonde.
+* `Echap` referme, `Cmd/Ctrl+R` sonde. La popover se referme aussi des qu'elle
+  perd le focus : c'est le comportement attendu d'une popover de barre de menus,
+  et sans lui elle n'avait aucun moyen de se fermer (pas de bordure, donc pas de
+  bouton).
+* Le menu indique la version installee, et annonce une mise a jour quand il y en
+  a une. Le widget **ne telecharge et n'installe rien** : il ouvre la page de la
+  release, tu decides. Verification une fois par jour, silencieuse si GitHub ne
+  repond pas.
 
 L'icone est un anneau dessine en RGBA a la main, sans bibliotheque de rendu, dans
 [`core/src/icon.rs`](crates/core/src/icon.rs). Elle vit dans le coeur, et non

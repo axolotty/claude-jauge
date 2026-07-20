@@ -1,7 +1,7 @@
 [package]
 name = "claude-jauge-tray"
 description = "Widget de barre de menus : la jauge de consommation Claude, toujours sous les yeux."
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.77"
 license = "MIT"
@@ -24,6 +24,9 @@ tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 # Une seule instance a la fois : sans lui, chaque lancement empile une icone de
 # plus dans la barre, et l'utilisateur se retrouve avec des fantomes.
 tauri-plugin-single-instance = "2"
+# Ouvre la page de la release dans le navigateur par defaut. Le widget ne
+# telecharge ni n'installe rien lui-meme : il previent, l'utilisateur decide.
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

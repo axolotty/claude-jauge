@@ -5,7 +5,9 @@ mod icon;
 
 use claude_jauge_core::quota::Health;
 use claude_jauge_core::{human_duration, meter::Origin, Meter, Policy, Window};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
@@ -193,15 +195,95 @@ fn changer_politique(app: &AppHandle, policy: Policy) {
     pousser(app, &snap);
 }
 
+/// Une fois par jour : une version ne sort pas toutes les heures, et personne
+/// n'a envie qu'un widget de barre de menus bavarde avec GitHub en continu.
+const INTERVALLE_MAJ: Duration = Duration::from_secs(24 * 3600);
+
+/// L'entree de menu qui annonce les mises a jour.
+struct EntreeMaj(MenuItem<Wry>);
+
+/// La derniere release connue, pour savoir quoi ouvrir au clic.
+struct DerniereRelease(std::sync::Mutex<Option<claude_jauge_core::update::Release>>);
+
+/// Interroge GitHub et met l'entree de menu a jour.
+///
+/// Silencieux en cas d'echec : etre hors ligne est normal, et ce n'est pas au
+/// widget de s'en plaindre. L'entree reste alors sur son dernier etat connu.
+fn verifier_maj(app: &AppHandle) {
+    use claude_jauge_core::update;
+
+    let Ok(release) = update::derniere_release() else {
+        return;
+    };
+    let neuve = update::plus_recente(update::VERSION_COURANTE, &release);
+
+    if let Some(entree) = app.try_state::<EntreeMaj>() {
+        let texte = if neuve {
+            format!("Mise a jour disponible : {}", release.version)
+        } else {
+            format!("claude-jauge {} (a jour)", update::VERSION_COURANTE)
+        };
+        let _ = entree.0.set_text(texte);
+        // Cliquable seulement quand il y a quelque chose a aller chercher.
+        let _ = entree.0.set_enabled(neuve);
+    }
+
+    if let Some(derniere) = app.try_state::<DerniereRelease>() {
+        if let Ok(mut garde) = derniere.0.lock() {
+            *garde = Some(release);
+        }
+    }
+}
+
+/// Date du dernier masquage, en millisecondes depuis le demarrage du programme.
+///
+/// Sert d'anti-rebond entre la perte de focus et le clic sur l'icone. Voir
+/// [`basculer`].
+static DERNIER_MASQUAGE: AtomicU64 = AtomicU64::new(0);
+
+/// Duree pendant laquelle un clic sur l'icone est ignore apres un masquage.
+///
+/// Cliquer l'icone alors que la popover est ouverte declenche deux choses
+/// presque simultanement : la fenetre perd le focus (donc se cache), puis le
+/// clic arrive. Sans ce delai, le clic verrait une fenetre deja cachee et la
+/// rouvrirait aussitot : la popover clignoterait au lieu de se fermer.
+const ANTI_REBOND_MS: u64 = 250;
+
+/// Millisecondes ecoulees depuis le demarrage.
+fn horloge() -> u64 {
+    static DEBUT: OnceLock<Instant> = OnceLock::new();
+    DEBUT.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Note qu'on vient de masquer la popover.
+///
+/// Separe du masquage lui-meme parce que les deux appelants ne manipulent pas le
+/// meme type : `on_window_event` recoit un `Window`, le reste un
+/// `WebviewWindow`. Rien ne justifie de les reconcilier pour deux lignes.
+fn noter_masquage() {
+    DERNIER_MASQUAGE.store(horloge(), Ordering::Relaxed);
+}
+
 /// Montre ou cache la popover.
 fn basculer(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+
+    // La fenetre vient-elle de se cacher toute seule en perdant le focus ?
+    // Alors ce clic est celui qui l'a fait perdre : il a deja produit son effet.
+    if horloge().saturating_sub(DERNIER_MASQUAGE.load(Ordering::Relaxed)) < ANTI_REBOND_MS {
+        return;
+    }
+
     if window.is_visible().unwrap_or(false) {
+        noter_masquage();
         let _ = window.hide();
     } else {
         let _ = window.show();
+        // set_focus est indispensable et pas cosmetique : sans lui la popover
+        // ne recevrait jamais l'evenement de perte de focus, donc ne se
+        // fermerait jamais d'elle-meme.
         let _ = window.set_focus();
     }
 }
@@ -247,6 +329,7 @@ fn main() {
                 let _ = fenetre.set_focus();
             }
         }))
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
         .invoke_handler(tauri::generate_handler![current, refresh, hide])
         .setup(|app| {
@@ -260,6 +343,15 @@ fn main() {
 
             let rafraichir =
                 MenuItem::with_id(app, "refresh", "Rafraichir maintenant", true, None::<&str>)?;
+            // Desactivee tant qu'on n'a rien a annoncer : une entree grisee dit
+            // « rien de neuf » sans qu'on ait a l'ecrire.
+            let maj = MenuItem::with_id(
+                app,
+                "maj",
+                format!("claude-jauge {} (a jour)", claude_jauge_core::update::VERSION_COURANTE),
+                false,
+                None::<&str>,
+            )?;
             let fidele = CheckMenuItem::with_id(
                 app,
                 "policy_fidele",
@@ -282,9 +374,10 @@ fn main() {
 
             let menu = Menu::with_items(
                 app,
-                &[&rafraichir, &sep_haut, &fidele, &prudent, &sep_bas, &quitter],
+                &[&rafraichir, &maj, &sep_haut, &fidele, &prudent, &sep_bas, &quitter],
             )?;
             app.manage(MenuPolitique { fidele, prudent });
+            app.manage(EntreeMaj(maj));
 
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(icon::gauge(None))
@@ -295,6 +388,18 @@ fn main() {
                     "refresh" => {
                         let snap = snapshot(&app.state::<Meter>(), true);
                         pousser(app, &snap);
+                    }
+                    "maj" => {
+                        use tauri_plugin_opener::OpenerExt;
+                        let url = app
+                            .state::<DerniereRelease>()
+                            .0
+                            .lock()
+                            .ok()
+                            .and_then(|r| r.clone())
+                            .map(|r| r.url)
+                            .unwrap_or_else(claude_jauge_core::update::page_releases);
+                        let _ = app.opener().open_url(url, None::<&str>);
                     }
                     "policy_fidele" => changer_politique(app, Policy::Fidele),
                     "policy_prudent" => changer_politique(app, Policy::Prudent),
@@ -314,6 +419,16 @@ fn main() {
                 })
                 .build(app)?;
 
+            app.manage(DerniereRelease(Default::default()));
+
+            // Verification des mises a jour, dans son propre fil : une API qui
+            // ne repond pas ne doit pas retarder l'affichage des quotas.
+            let pour_maj = app.handle().clone();
+            std::thread::spawn(move || loop {
+                verifier_maj(&pour_maj);
+                std::thread::sleep(INTERVALLE_MAJ);
+            });
+
             // Premier releve tout de suite, puis a la cadence d'affichage.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -324,13 +439,24 @@ fn main() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // Fermer la popover ne doit pas quitter l'application : le widget
             // vit dans la barre, pas dans une fenetre.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
+                noter_masquage();
                 let _ = window.hide();
             }
+            // Une popover de barre de menus se referme des qu'on va voir
+            // ailleurs. Sans ca, la fenetre n'a aucun bouton de fermeture
+            // (`decorations: false`), et il ne reste que le re-clic sur l'icone
+            // ou la touche Echap, qui exige le focus. Autrement dit : elle
+            // pouvait rester coincee a l'ecran.
+            tauri::WindowEvent::Focused(false) => {
+                noter_masquage();
+                let _ = window.hide();
+            }
+            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("construction de l'application")

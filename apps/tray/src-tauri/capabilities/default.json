@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Ce dont la popover a besoin : rien de plus que se montrer, se cacher, et appeler nos trois commandes.",
-  "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-hide", "core:window:allow-show"]
+  "description": "Ce dont la popover a besoin : rien de plus que se montrer, se cacher, et appeler nos trois commandes. L'ouverture du navigateur (plugin opener) n'y figure pas : elle est declenchee depuis Rust, et les capacites ne gouvernent que les appels venus de la webview.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-show"
+  ]
 }
