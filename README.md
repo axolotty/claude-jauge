@@ -12,6 +12,82 @@ le sens du mot `unified` dans le nom des en-tetes.
 
 ![les etats de la jauge](docs/jauge.png)
 
+## Installation
+
+Les paquets sont sur la [page des releases](https://github.com/axolotty/claude-jauge/releases/latest).
+
+| Fichier | Pour qui |
+| --- | --- |
+| `claude-jauge_<v>_universal.dmg` | macOS, Intel **et** Apple Silicon |
+| `claude-jauge_<v>_amd64.deb` | Debian, Ubuntu |
+| `claude-jauge_<v>_x64-setup.exe` | Windows |
+| `claude-jauge_<v>_x64_en-US.msi` | Windows, deploiement en parc |
+| `claude-jauge-macos`, `-linux-x86_64`, `-windows-x86_64.exe` | le CLI, a part |
+
+> **Les binaires ne sont ni signes ni notaries.** Un certificat de developpeur
+> coute 99 $/an chez Apple et une centaine d'euros chez un fournisseur Windows ;
+> ce projet n'en a pas. Ton systeme va donc rechigner au premier lancement, et il
+> a raison de le faire : il ne peut pas verifier d'ou vient le programme. Ce qui
+> suit explique comment passer outre en connaissance de cause. Le code est
+> ouvert, les paquets sont [construits publiquement par la
+> CI](https://github.com/axolotty/claude-jauge/actions) a partir de ce depot :
+> tu peux verifier ce que tu installes, ou compiler toi-meme.
+
+### macOS
+
+Un `.dmg` non signe se heurte a Gatekeeper. Au premier lancement :
+
+1. Ouvre le `.dmg`, glisse `claude-jauge` dans **Applications**.
+2. Dans le Finder, **clic droit** sur l'application, puis **Ouvrir**. Un
+   double-clic ordinaire ne proposerait que « Deplacer vers la corbeille ».
+3. Confirme dans la fenetre qui s'affiche. macOS retient ton choix : les
+   lancements suivants sont normaux.
+
+Sur macOS 15 (Sequoia) et au-dela, le clic droit ne suffit plus toujours. Il faut
+alors passer par **Reglages Systeme > Confidentialite et securite**, descendre
+jusqu'au message qui nomme `claude-jauge`, et cliquer **Ouvrir quand meme**.
+
+Si l'application est signalee comme « endommagee », c'est l'attribut de mise en
+quarantaine, pose sur tout fichier telecharge :
+
+```sh
+xattr -dr com.apple.quarantine /Applications/claude-jauge.app
+```
+
+### Windows
+
+SmartScreen affiche « Windows a protege votre ordinateur » : clique sur
+**Informations complementaires**, puis **Executer quand meme**.
+
+### Linux
+
+```sh
+sudo dpkg -i claude-jauge_*_amd64.deb
+```
+
+Rien a contourner. Sous GNOME avec Wayland, le tray reclame en revanche
+l'extension [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/),
+sans laquelle l'icone n'apparaitra pas.
+
+### Le CLI
+
+Le binaire `claude-jauge` voyage separement, parce qu'il sert seul : c'est lui
+qui porte `claude-jauge statusline`, donc le mode sans jeton ni appel API. Pose-le
+quelque part dans ton `PATH` et rends-le executable :
+
+```sh
+chmod +x claude-jauge-macos && mv claude-jauge-macos ~/.local/bin/claude-jauge
+```
+
+Sur macOS, la meme quarantaine s'applique : `xattr -d com.apple.quarantine claude-jauge`.
+
+### Mises a jour
+
+Le menu du widget verifie une fois par jour et annonce les nouvelles versions,
+mais **ne telecharge et n'installe rien** : il ouvre la page de la release. Une
+installation automatique supposerait des binaires signes, faute de quoi le
+systeme refuserait ce qui aurait ete pose sans son accord.
+
 ## Deux facons d'obtenir les chiffres
 
 ### 1. La statusline, la voie normale
@@ -238,18 +314,7 @@ cargo build --release -p claude-jauge-cli
 
 ## Le widget
 
-Une release fournit sept fichiers, pas un de plus :
-
-| Fichier | Pour qui |
-| --- | --- |
-| `claude-jauge_<v>_universal.dmg` | macOS, Intel **et** Apple Silicon dans le meme paquet |
-| `claude-jauge_<v>_amd64.deb` | Debian, Ubuntu |
-| `claude-jauge_<v>_x64-setup.exe` | Windows, installeur |
-| `claude-jauge_<v>_x64_en-US.msi` | Windows, deploiement en parc |
-| `claude-jauge-macos`, `-linux-x86_64`, `-windows-x86_64.exe` | le CLI, indispensable a `claude-jauge statusline` |
-
-Le CLI voyage a part parce qu'il sert seul : c'est lui qui porte la statusline,
-donc le mode sans jeton ni appel API. Installer le widget ne l'installe pas.
+Pour installer un paquet, voir [Installation](#installation). Pour compiler :
 
 ```sh
 cd apps/tray
