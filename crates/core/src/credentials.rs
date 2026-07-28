@@ -130,6 +130,23 @@ pub fn run_command(command: &str, timeout: Duration) -> Result<String, String> {
         .spawn()
         .map_err(|err| format!("commande impossible a lancer ({err})"))?;
 
+    // La sortie est vidangee dans son propre fil, EN MEME TEMPS que l'attente.
+    //
+    // La lire apres la fin du processus, comme on le faisait, marche tant que la
+    // reponse est courte. Passe la taille du tampon du tube (64 Ko sous Linux),
+    // l'enfant se bloque en ecriture parce que personne ne lit ; il ne se termine
+    // donc jamais, et notre boucle attend un processus que notre propre attente
+    // empeche de finir. Le cas n'a rien d'exotique : `credentials.command` peut
+    // etre un `ssh` qui rapatrie un document, et rien ne borne sa taille.
+    let mut flux = child.stdout.take();
+    let lecteur = std::thread::spawn(move || {
+        let mut sortie = String::new();
+        if let Some(flux) = flux.as_mut() {
+            let _ = flux.read_to_string(&mut sortie);
+        }
+        sortie
+    });
+
     let debut = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -138,6 +155,12 @@ pub fn run_command(command: &str, timeout: Duration) -> Result<String, String> {
                 if debut.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // On NE joint PAS le lecteur ici, et c'est deliberé : tuer
+                    // le `sh` ne tue pas ce qu'il a lui-meme lance, et ce
+                    // petit-enfant garde le tube ouvert. Attendre la fin du
+                    // lecteur reviendrait donc a attendre la fin du processus
+                    // qu'on vient justement de renoncer a attendre. Le fil se
+                    // terminera de lui-meme quand le tube se fermera.
                     return Err(format!(
                         "la commande n'a pas repondu en {} s. Sur macOS, c'est souvent \
                          une autorisation de trousseau qui attend un clic.",
@@ -150,10 +173,7 @@ pub fn run_command(command: &str, timeout: Duration) -> Result<String, String> {
         }
     };
 
-    let mut sortie = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_string(&mut sortie);
-    }
+    let sortie = lecteur.join().unwrap_or_default();
 
     if !status.success() {
         return Err(format!(
@@ -331,6 +351,26 @@ mod tests {
         // Coupee bien avant les 5 secondes du sleep.
         assert!(debut.elapsed() < Duration::from_secs(2), "pas coupee assez vite");
         assert!(err.contains("repondu"), "message inattendu : {err}");
+    }
+
+    #[test]
+    fn une_grosse_sortie_ne_bloque_pas_la_commande() {
+        // Le tampon d'un tube fait 64 Ko sous Linux. En ne lisant qu'apres la
+        // fin du processus, on bloquait l'enfant en ecriture : il ne se
+        // terminait jamais, et l'attente ne rendait la main qu'au timeout.
+        // 512 Ko passent donc largement le seuil.
+        let taille = 512 * 1024;
+        let debut = Instant::now();
+        let sortie = run_command(
+            &format!("yes x | head -c {taille}"),
+            Duration::from_secs(20),
+        )
+        .expect("la commande aurait du rendre sa sortie");
+        assert_eq!(sortie.len(), taille, "sortie tronquee");
+        assert!(
+            debut.elapsed() < Duration::from_secs(10),
+            "a traine : probablement bloquee jusqu'au timeout"
+        );
     }
 
     #[test]
