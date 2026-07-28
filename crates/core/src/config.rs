@@ -183,6 +183,16 @@ pub fn store(path: &Path, config: &Config) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut file = fs::File::create(&tmp)?;
+        // Restreint AVANT d'ecrire, pas apres : entre la creation et le
+        // changement de droits, le fichier existerait en clair et lisible par
+        // tout le monde. `credentials.token` est un jeton OAuth, et sur une
+        // machine partagee le mode 0644 par defaut le donnait a n'importe quel
+        // autre compte.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&encoded)?;
         file.sync_all()?;
     }
@@ -262,6 +272,21 @@ mod tests {
         assert!(config.remote.command.is_some());
         assert!(!config.credentials.is_explicit());
         assert_eq!(config.policy, Policy::Fidele);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn le_fichier_de_reglages_nest_lisible_que_par_son_proprietaire() {
+        // Il peut contenir `credentials.token`, un jeton OAuth : le mode 0644
+        // par defaut le donnait a tous les comptes de la machine.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new("droits");
+        let fichier = dir.0.join("config.json");
+        store(&fichier, &Config::default()).expect("ecriture");
+
+        let mode = fs::metadata(&fichier).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode {mode:o} au lieu de 600");
     }
 
     #[test]
