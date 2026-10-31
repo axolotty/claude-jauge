@@ -13,7 +13,8 @@ jobs:
   tests:
     runs-on: docker
     container:
-      image: rust:1-slim-trixie
+      # Image avec node (requis par actions/checkout) + toolchain rust.
+      image: ghcr.io/catthehacker/ubuntu:rust-latest
     steps:
       - uses: actions/checkout@v4
       # --locked : un Cargo.lock qui a bougé doit faire échouer la CI.
