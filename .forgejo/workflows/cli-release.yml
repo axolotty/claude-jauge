@@ -1,0 +1,31 @@
+# Sur tag v* : reteste puis publie le binaire CLI Linux en artefact Forgejo.
+# (Équivalent du job « cli linux » de l'ancien .onedev-buildspec.yml.)
+name: cli-linux
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  cli:
+    runs-on: docker
+    container:
+      image: rust:1-slim-trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tester puis compiler
+        run: |
+          set -e
+          # Un artefact de release ne sort pas d'un arbre non vérifié.
+          cargo test --workspace --locked
+          cargo build --release --locked -p claude-jauge-cli
+          mkdir -p artefacts
+          cp target/release/claude-jauge artefacts/claude-jauge-linux-x86_64
+          ./artefacts/claude-jauge-linux-x86_64 --version
+
+      - name: publier le binaire
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: claude-jauge-linux-x86_64
+          path: artefacts/claude-jauge-linux-x86_64

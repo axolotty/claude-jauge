@@ -1,0 +1,49 @@
+# CI Forgejo : tests du cœur + check de compilation du widget.
+# Remplace .onedev-buildspec.yml (job tests) et double check.yml GitHub côté forge.
+# Les paquets multi-OS (.dmg/.msi/AppImage) restent sur GitHub Actions (release.yml),
+# déclenchés quand le miroir pousse un tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: docker
+    container:
+      image: rust:1-slim-trixie
+    steps:
+      - uses: actions/checkout@v4
+      # --locked : un Cargo.lock qui a bougé doit faire échouer la CI.
+      - run: cargo test --workspace --locked
+
+  widget-check:
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dépendances système + rust
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev patchelf build-essential pkg-config curl ca-certificates
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      - name: front
+        working-directory: apps/tray
+        run: |
+          npm ci
+          # cargo check lit tauri.conf.json qui pointe sur ../dist : sans build
+          # du front, generate_context! échoue sur un dossier absent.
+          npm run build
+
+      - name: cargo check du widget
+        working-directory: apps/tray/src-tauri
+        run: |
+          . "$HOME/.cargo/env"
+          cargo check --locked --all-targets
