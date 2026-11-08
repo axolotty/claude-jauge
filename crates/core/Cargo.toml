@@ -14,3 +14,8 @@ serde_json.workspace = true
 # Client HTTP bloquant et leger. On le prend en rustls plutot qu'en native-tls
 # pour ne rien exiger du systeme (pas d'OpenSSL a installer sur l'hote).
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+# Uniquement pour lire les dates RFC 3339 de l'endpoint usage, qui ne donne pas
+# d'epoch contrairement aux en-tetes. Sans horloge ni fuseaux : le coeur
+# continue de ne manipuler que des epochs.
+chrono = { version = "0.4", default-features = false, features = ["std"] }

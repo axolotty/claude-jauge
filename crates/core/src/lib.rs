@@ -20,11 +20,12 @@ pub mod probe;
 pub mod quota;
 pub mod statusline;
 pub mod update;
+pub mod usage;
 
 pub use config::{Config, Policy};
 pub use credentials::Credentials;
 pub use meter::{Meter, Origin, Reading};
-pub use quota::{human_duration, Quota, Source, Window, WindowKind};
+pub use quota::{human_duration, ModelWeek, Quota, Source, Window, WindowKind};
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};

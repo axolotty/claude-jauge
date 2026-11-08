@@ -7,7 +7,7 @@ use chrono::{Datelike, Local, TimeZone};
 use claude_jauge_core::quota::Health;
 use claude_jauge_core::statusline::Input;
 use claude_jauge_core::{
-    human_duration, meter::Origin, Meter, Policy, Quota, Reading, Source, Window, WindowKind,
+    human_duration, meter::Origin, Meter, Policy, Quota, Reading, Source, Window,
 };
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
@@ -63,6 +63,12 @@ FONCTIONNEMENT
                 jamais rien tout seul, mais peut afficher 0 % apres un reset.
 
     Entre deux sondes, le compte a rebours est recalcule en local, sans reseau.
+
+    La fenetre hebdo propre a un modele (« Fable » sur l'abonnement Max) ne
+    circule ni par la statusline ni par les en-tetes : elle vient de l'endpoint
+    de compte qu'interroge l'ecran /usage de Claude Code. Gratuit, sans token
+    consomme, sans fenetre ouverte. Rafraichie au plus toutes les 30 min des
+    qu'un jeton est disponible ; la jauge n'apparait que si le compte en a une.
 ";
 
 struct Options {
@@ -221,15 +227,29 @@ fn statusline() -> ExitCode {
     };
 
     let now = claude_jauge_core::now();
-    let quota = input.quota(now);
+    let mut quota = input.quota(now);
+    let meter = Meter::new().ok();
 
     // C'est ici que la statusline nourrit le widget. Un cache en echec ne doit
-    // pas priver l'utilisateur de sa barre pour autant.
-    if let (Some(releve), Ok(meter)) = (quota.as_ref(), Meter::new()) {
-        let _ = meter.record_statusline(releve);
+    // pas priver l'utilisateur de sa barre pour autant. Le releve rendu revient
+    // complete de la fenetre modele que le cache connait deja.
+    if let (Some(releve), Some(m)) = (quota.as_ref(), meter.as_ref()) {
+        if let Ok(complet) = m.record_statusline(releve) {
+            quota = Some(complet);
+        }
     }
 
     println!("{}", ligne_statut(&input, quota.as_ref(), now));
+    // La barre est servie : ce qui suit a le droit de prendre le temps d'un
+    // appel reseau sans la retarder.
+    let _ = io::stdout().flush();
+
+    // C'est le montage statusline qui tient la fenetre modele a jour : la barre
+    // se rend pendant qu'on travaille, exactement quand les quotas bougent.
+    // Au plus un appel toutes les 30 min, silencieux, voir refresh_model_week.
+    if let (Some(releve), Some(m)) = (quota.as_mut(), meter.as_ref()) {
+        m.refresh_model_week(releve, now);
+    }
     ExitCode::SUCCESS
 }
 
@@ -251,14 +271,16 @@ fn ligne_statut(input: &Input, quota: Option<&Quota>, now: u64) -> String {
     }
 
     if let Some(releve) = quota {
-        for fenetre in [&releve.five_hour, &releve.seven_day] {
+        let mut fenetres: Vec<(&str, &Window)> =
+            vec![("5h", &releve.five_hour), ("7j", &releve.seven_day)];
+        // La fenetre modele porte son propre nom (« Fable ») : il vient de
+        // l'API, jamais d'ici.
+        if let Some(mw) = &releve.model_week {
+            fenetres.push((mw.label.as_str(), &mw.window));
+        }
+        for (etiquette, fenetre) in fenetres {
             let Some(taux) = fenetre.utilization else {
                 continue;
-            };
-            let etiquette = match fenetre.kind {
-                WindowKind::FiveHour => "5h",
-                WindowKind::SevenDay => "7j",
-                WindowKind::Overage => "over",
             };
             let reste = match fenetre.seconds_left(now) {
                 Some(secondes) => format!(" {}{}{}", c(GRIS), human_duration(secondes), c(RESET)),
@@ -315,6 +337,13 @@ fn en_json(reading: &Reading) -> String {
         serde_json::json!({
             "five_hour": fenetre(&q.five_hour),
             "seven_day": fenetre(&q.seven_day),
+            "model_week": q.model_week.as_ref().map(|mw| {
+                let mut f = fenetre(&mw.window);
+                // Le nom du modele vient de l'API, pas d'un libelle fige ici.
+                f["label"] = serde_json::Value::from(format!("Semaine {}", mw.label));
+                f["model"] = serde_json::Value::from(mw.label.clone());
+                f
+            }),
             "overage": fenetre(&q.overage),
             "overall_status": q.overall_status,
             "fallback": q.fallback,
@@ -426,14 +455,25 @@ fn en_texte(reading: &Reading, couleur: bool) -> String {
         }
     };
 
-    for w in quota.windows() {
-        // Une fenetre dont on ne sait rien n'apprend rien. La statusline ne donne
-        // pas l'overage : mieux vaut taire la ligne qu'aligner des points
-        // d'interrogation.
-        if w.utilization.is_none() && w.reset_at.is_none() {
-            continue;
-        }
-        out.push_str(&ligne(w, now, couleur));
+    let mut fenetres: Vec<(String, &Window)> = vec![
+        (quota.five_hour.kind.label().to_string(), &quota.five_hour),
+        (quota.seven_day.kind.label().to_string(), &quota.seven_day),
+    ];
+    if let Some(mw) = &quota.model_week {
+        fenetres.push((format!("Semaine {}", mw.label), &mw.window));
+    }
+    fenetres.push((quota.overage.kind.label().to_string(), &quota.overage));
+
+    // Une fenetre dont on ne sait rien n'apprend rien. La statusline ne donne
+    // pas l'overage : mieux vaut taire la ligne qu'aligner des points
+    // d'interrogation.
+    fenetres.retain(|(_, w)| w.utilization.is_some() || w.reset_at.is_some());
+
+    // La colonne des noms s'adapte au plus long : « Semaine Fable » depasse
+    // les libelles historiques, et le nom du modele peut changer de taille.
+    let largeur = fenetres.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0);
+    for (label, w) in &fenetres {
+        out.push_str(&ligne(&format!("{label:<largeur$}"), w, now, couleur));
     }
 
     out.push('\n');
@@ -442,7 +482,7 @@ fn en_texte(reading: &Reading, couleur: bool) -> String {
     out
 }
 
-fn ligne(w: &Window, now: u64, couleur: bool) -> String {
+fn ligne(label: &str, w: &Window, now: u64, couleur: bool) -> String {
     let c = |code: &'static str| if couleur { code } else { "" };
 
     let pourcent = match w.utilization {
@@ -473,8 +513,8 @@ fn ligne(w: &Window, now: u64, couleur: bool) -> String {
     };
 
     format!(
-        "  {:<11} {}{}{}  {}  {:<11}  {}{}\n",
-        w.kind.label(),
+        "  {} {}{}{}  {}  {:<11}  {}{}\n",
+        label,
         c(teinte(w.utilization)),
         barre(w.utilization, 10),
         c(RESET),
@@ -524,6 +564,38 @@ fn pied(reading: &Reading, quota: &Quota, now: u64, couleur: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_jauge_core::quota::WindowKind;
+    use claude_jauge_core::ModelWeek;
+
+    #[test]
+    fn la_ligne_de_statut_montre_la_fenetre_modele_sous_son_nom() {
+        let document = r#"{
+            "model": { "display_name": "Fable" },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 21, "resets_at": 1794171600 },
+                "seven_day": { "used_percentage": 8, "resets_at": 1794726000 }
+            }
+        }"#;
+        let input = claude_jauge_core::statusline::parse(document).expect("un document");
+        let mut quota = input.quota(1794150000).expect("un releve");
+        quota.model_week = Some(ModelWeek {
+            label: "Fable".to_string(),
+            window: Window {
+                kind: WindowKind::ModelWeek,
+                utilization: Some(11.0),
+                reset_at: Some(1794726000),
+                status: None,
+            },
+        });
+
+        std::env::set_var("NO_COLOR", "1");
+        let ligne = ligne_statut(&input, Some(&quota), 1794150000);
+        std::env::remove_var("NO_COLOR");
+
+        // L'etiquette est le nom du modele, et le taux celui de SA fenetre.
+        assert!(ligne.contains("Fable ") && ligne.contains("11%"), "ligne : {ligne}");
+        assert!(ligne.contains("5h") && ligne.contains("21%"), "ligne : {ligne}");
+    }
 
     #[test]
     fn la_barre_se_remplit_proportionnellement() {

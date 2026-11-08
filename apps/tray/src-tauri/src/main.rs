@@ -95,10 +95,26 @@ fn snapshot(meter: &Meter, force: bool) -> Snapshot {
         .quota
         .as_ref()
         .map(|q| {
-            q.windows()
-                .iter()
-                .filter(|w| w.utilization.is_some() || w.reset_at.is_some())
-                .map(|w| view(w, now))
+            let mut vues: Vec<(Option<String>, &Window)> = vec![
+                (None, &q.five_hour),
+                (None, &q.seven_day),
+            ];
+            // La fenetre modele s'affiche sous le nom que l'API lui donne
+            // (« Semaine Fable »), jamais un libelle fige ici.
+            if let Some(mw) = &q.model_week {
+                vues.push((Some(format!("Semaine {}", mw.label)), &mw.window));
+            }
+            vues.push((None, &q.overage));
+
+            vues.into_iter()
+                .filter(|(_, w)| w.utilization.is_some() || w.reset_at.is_some())
+                .map(|(label, w)| {
+                    let mut vue = view(w, now);
+                    if let Some(label) = label {
+                        vue.label = label;
+                    }
+                    vue
+                })
                 .collect()
         })
         .unwrap_or_default();

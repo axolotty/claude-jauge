@@ -28,13 +28,16 @@ use serde::{Deserialize, Serialize};
 /// Prefixe commun a tous les en-tetes de quota.
 pub const HEADER_PREFIX: &str = "anthropic-ratelimit-unified";
 
-/// Les trois fenetres de quota exposees par l'API.
+/// Les fenetres de quota exposees par l'API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowKind {
     /// Fenetre glissante de 5 heures, ouverte par le premier message.
     FiveHour,
-    /// Quota hebdomadaire.
+    /// Quota hebdomadaire, tous modeles confondus.
     SevenDay,
+    /// Quota hebdomadaire propre a un modele (« Fable » sur l'abonnement Max).
+    /// Son nom vient de l'API, voir [`ModelWeek`].
+    ModelWeek,
     /// Depassement facture, remis a zero chaque mois.
     Overage,
 }
@@ -45,6 +48,10 @@ impl WindowKind {
         match self {
             WindowKind::FiveHour => "5h",
             WindowKind::SevenDay => "7d",
+            // Cote en-tetes l'API dit `7d_oi` (« overage included »), mais ce
+            // slug sert de cle d'affichage, pas de nom d'en-tete : la fenetre
+            // modele n'est jamais lue dans les en-tetes (voir [`crate::usage`]).
+            WindowKind::ModelWeek => "model_week",
             WindowKind::Overage => "overage",
         }
     }
@@ -54,6 +61,9 @@ impl WindowKind {
         match self {
             WindowKind::FiveHour => "Session 5h",
             WindowKind::SevenDay => "Semaine 7j",
+            // Libelle de secours : l'affichage prend le nom du modele porte par
+            // [`ModelWeek::label`] quand il est connu.
+            WindowKind::ModelWeek => "Semaine modele",
             WindowKind::Overage => "Overage",
         }
     }
@@ -131,6 +141,19 @@ impl Window {
     }
 }
 
+/// La fenetre hebdomadaire propre a un modele, avec le nom que l'API lui donne.
+///
+/// Sur l'abonnement Max, les gros modeles (« Fable » aujourd'hui) ont leur
+/// propre quota hebdo en plus du quota commun. Ni la statusline ni les en-tetes
+/// ne portent son nom : seule la reponse de l'endpoint usage le dit, et c'est
+/// elle qui fait foi plutot qu'un nom de modele code en dur ici.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelWeek {
+    /// Le nom du modele tel que l'API l'affiche (« Fable »).
+    pub label: String,
+    pub window: Window,
+}
+
 /// Comment un releve a ete obtenu.
 ///
 /// La distinction porte a consequence : un releve venu de la statusline est
@@ -160,6 +183,17 @@ pub struct Quota {
     pub fallback_percentage: Option<f64>,
     /// Quelle fenetre fait actuellement foi ("five_hour", "seven_day"...).
     pub representative_claim: Option<String>,
+    /// La fenetre hebdo propre a un modele, servie par l'endpoint usage.
+    ///
+    /// `None` hors abonnement Max, et sur tout cache ecrit par une version
+    /// anterieure : son absence n'est jamais une erreur.
+    #[serde(default)]
+    pub model_week: Option<ModelWeek>,
+    /// Date du dernier passage par l'endpoint usage, reussi ou non.
+    ///
+    /// Sert uniquement a espacer les appels : ce n'est pas l'age de la donnee.
+    #[serde(default)]
+    pub model_week_at: Option<u64>,
     /// Date du releve, en secondes depuis l'epoch.
     pub probed_at: u64,
     /// D'ou vient ce releve.
@@ -211,6 +245,10 @@ impl Quota {
             fallback_percentage: get(&format!("{HEADER_PREFIX}-fallback-percentage"))
                 .and_then(|raw| parse_utilization(&raw)),
             representative_claim: get(&format!("{HEADER_PREFIX}-representative-claim")),
+            // Les en-tetes portent bien une fenetre `7d_oi`, mais pas le nom du
+            // modele qu'elle couvre : c'est l'endpoint usage qui remplit ceci.
+            model_week: None,
+            model_week_at: None,
             probed_at,
             source: Source::Probe,
         };
@@ -243,6 +281,10 @@ impl Quota {
             five_hour: settle(&self.five_hour),
             seven_day: settle(&self.seven_day),
             overage: settle(&self.overage),
+            model_week: self.model_week.as_ref().map(|mw| ModelWeek {
+                label: mw.label.clone(),
+                window: settle(&mw.window),
+            }),
             ..self.clone()
         }
     }
@@ -433,6 +475,54 @@ mod tests {
         let w = Window::unknown(WindowKind::FiveHour);
         assert_eq!(w.health(), Health::Unknown);
         assert!(!w.is_blocked());
+    }
+
+    fn fenetre_fable(reset_at: u64) -> ModelWeek {
+        ModelWeek {
+            label: "Fable".to_string(),
+            window: Window {
+                kind: WindowKind::ModelWeek,
+                utilization: Some(11.0),
+                reset_at: Some(reset_at),
+                status: None,
+            },
+        }
+    }
+
+    #[test]
+    fn settled_remet_aussi_a_zero_la_fenetre_modele() {
+        let mut q = Quota::from_headers(lecteur(releve_reel()), 1784225000).unwrap();
+        q.model_week = Some(fenetre_fable(1784225400));
+
+        // Avant le reset, rien ne bouge.
+        let avant = q.settled(1784225399);
+        assert_eq!(avant.model_week.as_ref().unwrap().window.utilization, Some(11.0));
+
+        // Apres, la fenetre retombe a zero mais garde son nom.
+        let apres = q.settled(1784225401);
+        let mw = apres.model_week.unwrap();
+        assert_eq!(mw.label, "Fable");
+        assert_eq!(mw.window.utilization, Some(0.0));
+        assert_eq!(mw.window.reset_at, None);
+    }
+
+    #[test]
+    fn un_cache_dune_version_anterieure_reste_lisible() {
+        // Le format d'avant la fenetre modele : ni model_week ni model_week_at.
+        let ancien = r#"{
+            "five_hour": {"kind": "FiveHour", "utilization": 18.0, "reset_at": 1794171600, "status": null},
+            "seven_day": {"kind": "SevenDay", "utilization": 7.0, "reset_at": 1794726000, "status": null},
+            "overage": {"kind": "Overage", "utilization": null, "reset_at": null, "status": null},
+            "overall_status": null,
+            "fallback": null,
+            "fallback_percentage": null,
+            "representative_claim": null,
+            "probed_at": 1794159673,
+            "source": "statusline"
+        }"#;
+        let q: Quota = serde_json::from_str(ancien).expect("un cache ancien");
+        assert_eq!(q.model_week, None);
+        assert_eq!(q.model_week_at, None);
     }
 
     #[test]

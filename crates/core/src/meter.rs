@@ -27,7 +27,7 @@
 
 use crate::config::{self, Policy};
 use crate::quota::{Quota, Source};
-use crate::{activity, cache, credentials, paths, probe, Error};
+use crate::{activity, cache, credentials, paths, probe, usage, Error};
 use std::path::PathBuf;
 
 /// Duree d'une fenetre de session, telle qu'appliquee par l'API.
@@ -62,6 +62,13 @@ pub const MIN_PROBE_INTERVAL: u64 = 60;
 /// Le cache local sert de tampon : sans ce plancher, chaque battement d'horloge
 /// du widget ouvrirait une connexion.
 pub const REMOTE_INTERVAL: u64 = 60;
+
+/// Delai minimal entre deux appels a l'endpoint usage.
+///
+/// Rien a voir avec la prudence de [`should_probe`] : cet appel ne consomme
+/// aucun token et n'ouvre jamais de fenetre de 5h. C'est de la politesse
+/// envers l'API, et une fenetre hebdo n'a pas besoin de plus frais.
+pub const USAGE_INTERVAL: u64 = 1800;
 
 /// D'ou vient le releve affiche.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,13 +211,21 @@ impl Meter {
         config::store(&self.config_file, &config)
     }
 
-    /// Enregistre un releve venu de la statusline.
+    /// Enregistre un releve venu de la statusline, et rend ce qui fait foi.
     ///
     /// Appele par `claude-jauge statusline`, donc potentiellement plusieurs fois
     /// par seconde : on evite de reecrire un cache identique et tout frais,
     /// sinon chaque rendu de la barre declencherait un `fsync`.
-    pub fn record_statusline(&self, quota: &Quota) -> std::io::Result<()> {
+    ///
+    /// Le releve rendu porte en plus la derniere fenetre modele connue : la
+    /// statusline ne la fournit pas, et sans ce report chaque rendu de barre
+    /// l'effacerait du cache.
+    pub fn record_statusline(&self, quota: &Quota) -> std::io::Result<Quota> {
+        let mut neuf = quota.clone();
         if let Some(precedent) = cache::load(&self.cache_file) {
+            neuf.model_week = precedent.model_week.clone();
+            neuf.model_week_at = precedent.model_week_at;
+
             let frais = quota
                 .probed_at
                 .saturating_sub(precedent.probed_at)
@@ -220,10 +235,47 @@ impl Meter {
                 && precedent.five_hour.reset_at == quota.five_hour.reset_at
                 && precedent.seven_day.utilization == quota.seven_day.utilization;
             if frais && inchange {
-                return Ok(());
+                return Ok(precedent);
             }
         }
-        cache::store(&self.cache_file, quota)
+        cache::store(&self.cache_file, &neuf)?;
+        Ok(neuf)
+    }
+
+    /// Complete un releve avec la fenetre hebdo par modele, via l'endpoint usage.
+    ///
+    /// Cette voie-la est sans danger : pas de token consomme, pas de fenetre de
+    /// 5h ouverte (voir [`crate::usage`]). Elle n'a donc pas a passer par
+    /// [`should_probe`] ; seul [`USAGE_INTERVAL`] espace les appels, succes ou
+    /// echec confondus, pour qu'un endpoint en panne ne soit pas re-essaye a
+    /// chaque rendu de barre.
+    ///
+    /// Silencieuse en echec : cette fenetre est un bonus, pas un pilier, et elle
+    /// court notamment apres le rendu d'une statusline qui ne doit jamais crier.
+    /// Rend vrai quand un appel est parti (et le cache reecrit).
+    pub fn refresh_model_week(&self, quota: &mut Quota, now: u64) -> bool {
+        if matches!(quota.model_week_at, Some(at) if now.saturating_sub(at) < USAGE_INTERVAL) {
+            return false;
+        }
+
+        let config = config::load(&self.config_file);
+        // Une machine qui lit le releve d'une autre n'a pas de jeton a elle :
+        // c'est la machine distante qui tient cette fenetre a jour.
+        if config.remote.command.is_some() {
+            return false;
+        }
+        let Ok(creds) = credentials::load(&config.credentials) else {
+            return false;
+        };
+
+        quota.model_week_at = Some(now);
+        if let Ok(fenetre) = usage::fetch(&creds) {
+            // `None` compris : un compte qui perd sa fenetre modele doit voir
+            // sa jauge disparaitre, pas se figer sur le dernier chiffre.
+            quota.model_week = fenetre;
+        }
+        let _ = cache::store(&self.cache_file, quota);
+        true
     }
 
     /// Va chercher le releve sur une autre machine.
@@ -305,6 +357,17 @@ impl Meter {
     /// explicite de l'utilisateur, puisque cela peut ouvrir une fenetre de 5h.
     pub fn read(&self, force: bool) -> Reading {
         let now = crate::now();
+        let mut reading = self.consult(force, now);
+        // La fenetre modele ne vient ni de la statusline ni des en-tetes : on
+        // la complete ici, par la seule voie qui ne coute rien.
+        if let Some(quota) = reading.quota.as_mut() {
+            self.refresh_model_week(quota, now);
+        }
+        reading
+    }
+
+    /// Le gros de [`Self::read`] : sonde, cache ou machine distante.
+    fn consult(&self, force: bool, now: u64) -> Reading {
         // Les reglages sont relus a chaque tour : la bascule du menu et une
         // retouche du fichier a la main doivent prendre effet sans redemarrage.
         let config = config::load(&self.config_file);
@@ -346,7 +409,14 @@ impl Meter {
                 probe::probe(c, now)
                     .map_err(|err| format!("{err} [jeton lu depuis : {}]", c.source))
             }) {
-                Ok(fresh) => {
+                Ok(mut fresh) => {
+                    // Les en-tetes ne disent rien de la fenetre modele : on
+                    // reporte la derniere connue plutot que de l'effacer a
+                    // chaque sonde.
+                    if let Some(precedent) = &cached {
+                        fresh.model_week = precedent.model_week.clone();
+                        fresh.model_week_at = precedent.model_week_at;
+                    }
                     // Un cache en echec n'a pas a casser l'affichage.
                     let note = cache::store(&self.cache_file, &fresh)
                         .err()
@@ -406,8 +476,117 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quota::{ModelWeek, Window, WindowKind};
+    use std::path::Path;
 
     const MAINTENANT: u64 = 1_784_225_000;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(nom: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("claude-jauge-meter-{nom}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("dossier temporaire");
+            TempDir(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn meter_temporaire(dir: &Path) -> Meter {
+        Meter {
+            projects_dir: dir.join("projects"),
+            cache_file: dir.join("state.json"),
+            config_file: dir.join("config.json"),
+            policy_override: None,
+        }
+    }
+
+    fn releve_statusline(probed_at: u64, cinq_heures: f64) -> Quota {
+        Quota {
+            five_hour: Window {
+                kind: WindowKind::FiveHour,
+                utilization: Some(cinq_heures),
+                reset_at: Some(probed_at + 3600),
+                status: None,
+            },
+            seven_day: Window {
+                kind: WindowKind::SevenDay,
+                utilization: Some(14.0),
+                reset_at: Some(probed_at + 86400),
+                status: None,
+            },
+            overage: Window::unknown(WindowKind::Overage),
+            overall_status: None,
+            fallback: None,
+            fallback_percentage: None,
+            representative_claim: None,
+            model_week: None,
+            model_week_at: None,
+            probed_at,
+            source: Source::Statusline,
+        }
+    }
+
+    #[test]
+    fn la_statusline_ne_mange_pas_la_fenetre_modele() {
+        // Le scenario reel : l'endpoint usage a rempli la fenetre modele, puis
+        // Claude Code rend sa barre en continu. Chaque rendu repart d'un releve
+        // sans fenetre modele : sans report, elle disparaitrait du cache.
+        let dir = TempDir::new("report-model-week");
+        let meter = meter_temporaire(&dir.0);
+
+        // Un premier releve, auquel on greffe une fenetre modele comme le
+        // ferait refresh_model_week.
+        let mut initial = releve_statusline(MAINTENANT, 50.0);
+        initial.model_week = Some(ModelWeek {
+            label: "Fable".to_string(),
+            window: Window {
+                kind: WindowKind::ModelWeek,
+                utilization: Some(11.0),
+                reset_at: Some(MAINTENANT + 86400),
+                status: None,
+            },
+        });
+        initial.model_week_at = Some(MAINTENANT);
+        cache::store(&meter.cache_file, &initial).expect("cache initial");
+
+        // Un rendu de barre plus tard, avec des chiffres qui ont bouge.
+        let rendu = releve_statusline(MAINTENANT + 60, 51.0);
+        let garde = meter.record_statusline(&rendu).expect("enregistrement");
+
+        assert_eq!(garde.five_hour.utilization, Some(51.0));
+        assert_eq!(garde.model_week.as_ref().unwrap().label, "Fable");
+        assert_eq!(garde.model_week_at, Some(MAINTENANT));
+
+        // Et le cache aussi la garde, pas seulement la valeur rendue.
+        let relu = cache::load(&meter.cache_file).expect("cache relu");
+        assert_eq!(relu.model_week.unwrap().window.utilization, Some(11.0));
+    }
+
+    #[test]
+    fn un_rendu_identique_et_frais_rend_le_releve_complet_sans_reecrire() {
+        let dir = TempDir::new("rendu-identique");
+        let meter = meter_temporaire(&dir.0);
+
+        let mut initial = releve_statusline(MAINTENANT, 50.0);
+        initial.model_week_at = Some(MAINTENANT);
+        cache::store(&meter.cache_file, &initial).expect("cache initial");
+
+        // Memes chiffres, deux secondes plus tard : pas de reecriture, mais le
+        // releve rendu doit quand meme porter ce que le cache sait.
+        let mut rendu = releve_statusline(MAINTENANT, 50.0);
+        rendu.probed_at = MAINTENANT + 2;
+        let garde = meter.record_statusline(&rendu).expect("enregistrement");
+        assert_eq!(garde.model_week_at, Some(MAINTENANT));
+        assert_eq!(garde.probed_at, MAINTENANT);
+    }
 
     /// Raccourci : sonde prudente, cache issu d'une sonde.
     fn prudent(

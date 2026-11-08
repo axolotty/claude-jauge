@@ -21,7 +21,8 @@ pub const API_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const PROBE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Partage avec [`crate::usage`] : les deux voies parlent au meme serveur OAuth.
+pub(crate) const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Les jetons OAuth de Claude Code ne sont acceptes qu'avec cette identite.
 const SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";

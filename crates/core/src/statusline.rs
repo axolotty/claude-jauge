@@ -98,6 +98,11 @@ impl Input {
             fallback: None,
             fallback_percentage: None,
             representative_claim: None,
+            // La fenetre modele non plus : elle vient de l'endpoint usage, et
+            // c'est [`crate::meter::Meter::record_statusline`] qui reporte la
+            // derniere connue pour que chaque rendu ne l'efface pas.
+            model_week: None,
+            model_week_at: None,
             probed_at: now,
             source: Source::Statusline,
         })

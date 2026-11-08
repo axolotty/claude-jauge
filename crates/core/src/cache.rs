@@ -78,6 +78,8 @@ mod tests {
             fallback: Some("available".into()),
             fallback_percentage: Some(50.0),
             representative_claim: Some("five_hour".into()),
+            model_week: None,
+            model_week_at: None,
             probed_at: 1784225000,
             source: Source::Probe,
         }

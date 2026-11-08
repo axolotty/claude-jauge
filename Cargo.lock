@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "claude-jauge-cli"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "claude-jauge-core",
@@ -67,8 +67,9 @@ dependencies = [
 
 [[package]]
 name = "claude-jauge-core"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "ureq",
