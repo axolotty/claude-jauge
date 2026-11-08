@@ -2,6 +2,8 @@
 /target/
 **/target/
 Cargo.lock.orig
+# CARGO_HOME des builds en conteneur (le serveur n'a pas de toolchain locale)
+.cargo-docker/
 
 # Node / Vite
 node_modules/
