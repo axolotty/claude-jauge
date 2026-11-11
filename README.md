@@ -3,8 +3,9 @@
 Ou en est ta consommation Claude, sans jamais consommer de quota pour le savoir.
 
 Un widget de barre de menus (macOS, Linux, Windows) et un CLI headless, qui
-affichent le pourcentage restant et le temps avant la remise a zero des trois
-fenetres de quota : **session 5h**, **semaine 7j** et **overage** mensuel.
+affichent le pourcentage restant et le temps avant la remise a zero des
+fenetres de quota : **session 5h**, **semaine 7j**, la **semaine propre a un
+modele** (« Fable », sur l'abonnement Max) et l'**overage** mensuel.
 
 Les chiffres valent pour **tout Claude**, pas seulement Claude Code : sur Pro et
 Max, claude.ai, l'app de bureau et Claude Code puisent dans le meme pool. C'est
@@ -88,7 +89,7 @@ mais **ne telecharge et n'installe rien** : il ouvre la page de la release. Une
 installation automatique supposerait des binaires signes, faute de quoi le
 systeme refuserait ce qui aurait ete pose sans son accord.
 
-## Deux facons d'obtenir les chiffres
+## D'ou viennent les chiffres
 
 ### 1. La statusline, la voie normale
 
@@ -114,14 +115,17 @@ Il recoit alors, sur son entree standard :
 
 `claude-jauge statusline` affiche ces chiffres dans la barre, et en depose une
 copie dans le cache que lit le widget. Tant que le cache est ainsi alimente,
-**aucune sonde n'est envoyee** : ni appel API, ni jeton, ni en-tete non publie.
-La documentation precise d'ailleurs que la statusline ne consomme aucun token.
+**aucune sonde n'est envoyee** : ni message API, ni en-tete non publie. La
+documentation precise d'ailleurs que la statusline ne consomme aucun token.
+Seule exception, sans rapport avec la sonde : la fenetre par modele, qui passe
+par son propre canal (voir plus bas) au plus toutes les 30 minutes.
 
 C'est le chemin a privilegier, et de loin. Ses limites : `rate_limits` n'existe
 que pour les abonnes Pro et Max, et seulement apres la premiere reponse de l'API
-dans la session ; il n'y a ni overage ni fallback ; et elle ne s'execute que
-pendant que Claude Code tourne. Entre deux rendus, le compte a rebours avance en
-local, et les compteurs ne bougent de toute facon que si tu consommes.
+dans la session ; il n'y a ni overage, ni fallback, ni fenetre par modele ; et
+elle ne s'execute que pendant que Claude Code tourne. Entre deux rendus, le
+compte a rebours avance en local, et les compteurs ne bougent de toute facon que
+si tu consommes.
 
 > Attention a l'echelle si tu lis le code : ici `used_percentage` vaut deja 0 a
 > 100 (`23.5` pour 23,5 %), alors que les en-tetes HTTP du repli expriment une
@@ -148,6 +152,35 @@ Il faut un jeton **OAuth d'abonnement**, celui que Claude Code pose sur la
 machine. Une cle API de `console.anthropic.com` ne conviendrait pas : elle ouvre
 sur le pay-as-you-go, dont les quotas sont d'une autre nature (requetes/min,
 tokens/min) et qui ne renvoie aucun en-tete `unified-*`.
+
+### 3. La fenetre par modele, un canal a part
+
+Sur l'abonnement Max, les gros modeles (« Fable » aujourd'hui) ont leur propre
+quota hebdomadaire en plus du quota commun. Cette fenetre-la ne circule **ni**
+par la statusline (qui n'emet que `five_hour` et `seven_day`), **ni** nommee
+dans les en-tetes (ils portent bien sa jauge sous `7d_oi`, mais pas le nom du
+modele qu'elle couvre).
+
+Elle vient donc d'un troisieme canal : l'endpoint de compte
+`GET api.anthropic.com/api/oauth/usage`, celui qu'interroge l'ecran `/usage` de
+Claude Code. Trois proprietes le rendent sans danger, contrairement a la sonde :
+il ne consomme aucun token, il ne passe pas par `/v1/messages`, donc **il
+n'ouvre jamais de fenetre de 5h**, et il rend le nom du modele avec le chiffre,
+si bien que rien n'est code en dur ici : si le modele change de nom, la jauge
+suit.
+
+En pratique : des qu'un jeton est disponible (meme chaine de lecture que la
+sonde), `claude-jauge` interroge cet endpoint **au plus toutes les 30 minutes**,
+y compris depuis le mode statusline, apres avoir rendu sa ligne pour ne pas la
+retarder. C'est le seul appel reseau que ce mode puisse emettre. Sans jeton, ou
+hors abonnement Max (l'endpoint rend alors `null`), la jauge disparait
+simplement. Avec `remote`, c'est la machine distante qui la tient a jour dans
+son releve.
+
+Meme reserve que pour les en-tetes : cet endpoint n'est pas documente
+publiquement et peut changer sans preavis. Tout y est optionnel, un champ absent
+se tait. Et meme piege d'echelle qu'en statusline : son `percent` vaut deja 0 a
+100.
 
 ## Surveiller depuis une machine sans Claude Code
 
@@ -275,8 +308,9 @@ Le fichier, ecrit par le widget :
 
 ```
 claude-jauge/
-├── crates/core/    lib pure : jeton, sonde, en-tetes, cache, politique de releve,
-│                   et meme le dessin de l'icone. Aucune dependance graphique.
+├── crates/core/    lib pure : jeton, sonde, en-tetes, endpoint usage, cache,
+│                   politique de releve, et meme le dessin de l'icone. Aucune
+│                   dependance graphique.
 ├── crates/cli/     binaire `claude-jauge` : headless, pour un serveur ou tmux.
 └── apps/tray/      Tauri 2 + Svelte 5 : le widget de barre de menus.
 ```
@@ -294,14 +328,19 @@ cargo build --release -p claude-jauge-cli
 ```
 
 ```
-  Claude · pro
+  Claude · max
 
-  Session 5h  ▓▓▓▓▓▓▓▓▓▓   96%  reste   4%   reset 20:10 (45m)  limite proche
-  Semaine 7j  ▓▓░░░░░░░░   16%  reste  84%   reset dim 19/07 09:00 (2j13h)
-  Overage     ░░░░░░░░░░    0%  reste 100%   reset sam 01/08 02:00 (15j06h)
+  Session 5h    ▓▓▓▓▓▓▓▓▓▓   96%  reste   4%   reset 20:10 (45m)  limite proche
+  Semaine 7j    ▓▓░░░░░░░░   16%  reste  84%   reset dim 19/07 09:00 (2j13h)
+  Semaine Fable ▓░░░░░░░░░   13%  reste  87%   reset dim 19/07 09:00 (2j13h)
+  Overage       ░░░░░░░░░░    0%  reste 100%   reset sam 01/08 02:00 (15j06h)
 
   releve a l'instant · repli dispo a 50%
 ```
+
+La ligne `Semaine Fable` n'apparait que si le compte a une fenetre par modele
+(abonnement Max), sous le nom que l'API lui donne. En JSON, elle sort sous la
+cle `model_week`, avec le nom brut dans `model`.
 
 | Option | Effet |
 | --- | --- |
@@ -377,7 +416,9 @@ future n'apparaisse pas a tort comme un refus.
 ## Vie privee
 
 Le jeton OAuth est lu la ou Claude Code l'a mis, ou a l'endroit que designe le
-bloc `credentials`, et n'est envoye qu'a `api.anthropic.com`. Il n'est jamais
+bloc `credentials`, et n'est envoye qu'a `api.anthropic.com` : par la sonde,
+et par l'endpoint usage qui alimente la fenetre par modele (au plus un appel
+toutes les 30 minutes, y compris en mode statusline). Il n'est jamais
 ecrit sur le disque : avec `credentials.command`, il ne fait que transiter en
 memoire. Il
 n'est jamais reecrit : les jetons de rafraichissement tournent a chaque usage,
@@ -392,14 +433,18 @@ l'un ni l'autre ne contient de jeton.
 ## Integration continue
 
 Le travail est partage entre deux forges, et ce n'est pas un caprice : **un
-`.dmg` ne se compile que sur macOS, un `.msi` que sur Windows**. Le serveur
-OneDev n'ayant que du Linux, il ne peut pas produire l'app.
+`.dmg` ne se compile que sur macOS, un `.msi` que sur Windows**. La forge
+auto-hebergee n'ayant que du Linux, elle ne peut pas produire l'app.
 
 | | Quand | Ce qui en sort |
 | --- | --- | --- |
-| **OneDev** ([`.onedev-buildspec.yml`](.onedev-buildspec.yml)) | chaque push | tests du coeur et du CLI |
-| **OneDev** | tag `v*` | binaire CLI Linux, en artefact de build |
+| **Forgejo Actions** ([`ci.yml`](.forgejo/workflows/ci.yml)) | chaque push | tests du coeur et du CLI, `cargo check` du widget |
+| **Forgejo Actions** ([`cli-release.yml`](.forgejo/workflows/cli-release.yml)) | tag `v*` | binaire CLI Linux, en artefact de build |
 | **GitHub Actions** ([`release.yml`](.github/workflows/release.yml)) | tag `v*` | 4 installeurs (`.dmg` universel, `.deb`, `.exe`, `.msi`) et 3 binaires CLI |
+
+GitHub n'est qu'un **miroir de push** : on ne pousse que vers la forge, qui
+repercute commits et tags, et c'est cette repercussion qui declenche
+`release.yml`.
 
 Publier une version. **Le numero vit a quatre endroits**, et c'est
 `tauri.conf.json` qui nomme les paquets : tagger sans les mettre a jour tous
@@ -411,29 +456,20 @@ produirait un `claude-jauge_0.1.0_x64.dmg` sous un tag `v0.1.1`.
 #      apps/tray/src-tauri/tauri.conf.json, apps/tray/package.json
 # 2. Les deux Cargo.lock (la racine, et l'app Tauri qui est hors workspace)
 cargo update -w
-(cd apps/tray/src-tauri && cargo update -p claude-jauge-tray -p claude-jauge-core)
+(cd apps/tray/src-tauri && cargo update -w)
 
 git commit -am "0.2.0"
 git tag -a v0.2.0 -m "claude-jauge 0.2.0"
-git push origin main && git push github main
-git push origin v0.2.0    # OneDev : tests + CLI Linux
-git push github v0.2.0    # GitHub : les paquets des trois OS
+git push origin main
+git push origin v0.2.0    # Forgejo : tests + CLI Linux, et le miroir
+                          # repercute le tag sur GitHub, qui sort les paquets
 ```
 
 **Un tag pousse ne se deplace jamais.** S'il faut corriger, on incremente.
 
 La release GitHub est creee **en brouillon** : rien n'est publie sans relecture.
 
-### Deux pieges rencontres
-
-Le buildspec OneDev est un schema versionne, et les exemples qui circulent en
-ligne sont perimes. Pour OneDev 16.1.0 il faut `version: 52` (les methodes
-`migrateN` du jar amenent *vers* N, donc la derniere presente donne la version
-courante, pas celle d'apres), `!PosixInterpreter` et non `DefaultInterpreter`,
-`commands` en texte et non en liste, `condition: SUCCESSFUL` et non
-`ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL`, `runAs` sous forme `<uid>:<gid>`, et un
-`userMatch` obligatoire sur `BranchUpdateTrigger`. Aucun executeur n'a besoin
-d'etre configure : OneDev en decouvre un via `docker.sock`.
+### Un piege rencontre
 
 Cote GitHub, pousser un fichier de workflow exige le scope `workflow` sur le
 jeton (`gh auth refresh -h github.com -s workflow`), et **un tag pousse dans le
@@ -446,8 +482,9 @@ repousser une fois le workflow enregistre.
 cargo test        # coeur + CLI, sans serveur graphique
 ```
 
-84 tests couvrent le parsing des en-tetes (a partir d'un releve reel), la
-politique de sonde, le cache, la detection d'activite et le dessin de l'icone.
+106 tests couvrent le parsing des en-tetes et de l'endpoint usage (a partir de
+releves reels), la politique de sonde, le report de la fenetre par modele, le
+cache, la detection d'activite et le dessin de l'icone.
 
 ## Licence
 
